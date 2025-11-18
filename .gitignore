@@ -1,0 +1,21 @@
+# virtualenv
+.venv/
+uv.lock
+# python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+# editor
+.vscode/
+.idea/
+# system
+.DS_Store
+# env files
+.env
+# pytest / caches
+.pytest_cache/
+old_files/
+logs/
+bkp/
+inspect_db/
