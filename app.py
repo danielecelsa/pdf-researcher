@@ -14,11 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 import uuid
 import json
-import logging
 import base64
 import fitz  # pymupdf
-import valkey
-from logtail import LogtailHandler
 from time import perf_counter
 
 import streamlit as st
@@ -34,8 +31,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains import create_retrieval_chain
 from langchain_core.documents import Document
-from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from langchain_core.callbacks import Callbacks
 
 
 # Vector DB: Chroma integration
@@ -52,9 +49,12 @@ from helpers import (
     compute_cost,
     get_user_info,
     process_agent_events,
+    TokenUsageCallbackHandler
 )
 
 from async_bg import collect_events_from_agent
+
+from prompts import RAG_AGENT_SYSTEM_PROMPT, RAG_RETRIEVAL_PROMPT
 
 # Load environment variables from .env file if not in a rendering environment
 if os.getenv("RENDER") != "true":
@@ -89,7 +89,7 @@ logger_all = get_logger("all")
 if "conversation_thread_id" not in st.session_state:
     st.session_state.conversation_thread_id = str(uuid.uuid4())
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = [AIMessage(content="Hello, I am a chatbot. I can answer general knowledge questions, or document-related if you upload files. How can I help you?")]
+    st.session_state.chat_history = [AIMessage(content="Hello, I am your personal chatbot. I can answer general knowledge questions, or document-related if you upload files. How can I help you?")]
 if "uploaders" not in st.session_state:
     st.session_state.uploaders = []
 if "example_loaded" not in st.session_state: # to avoid reloading example multiple times
@@ -104,13 +104,15 @@ if "latency" not in st.session_state:
 if "trace" not in st.session_state:
     st.session_state.trace = []
 
+# --- Token tracking ---
+# Overall session tokens
 if "total_tokens" not in st.session_state:
     st.session_state["total_tokens"] = 0
 if "total_input_tokens" not in st.session_state: # to track total input tokens cost
     st.session_state["total_input_tokens"] = 0
 if "total_output_tokens" not in st.session_state: # to track total output tokens cost
     st.session_state["total_output_tokens"] = 0
-
+# Last interaction tokens
 if "input_tokens_last" not in st.session_state:
     st.session_state.input_tokens_last = 0
 if "output_tokens_last" not in st.session_state:
@@ -118,26 +120,80 @@ if "output_tokens_last" not in st.session_state:
 if "total_tokens_last" not in st.session_state:
     st.session_state.total_tokens_last = 0
 
+# RAG-specific token tracking
+if "RAG_total_tokens" not in st.session_state:
+    st.session_state.RAG_total_tokens = 0
+if "RAG_input_tokens" not in st.session_state:
+    st.session_state.RAG_input_tokens = 0
+if "RAG_output_tokens" not in st.session_state:
+    st.session_state.RAG_output_tokens = 0
+if "RAG_total_tokens_last" not in st.session_state:
+    st.session_state.RAG_total_tokens_last = 0
+if "RAG_input_tokens_last" not in st.session_state:
+    st.session_state.RAG_input_tokens_last = 0
+if "RAG_output_tokens_last" not in st.session_state:
+    st.session_state.RAG_output_tokens_last = 0
+
+# Cost tracking
 if "usd" not in st.session_state:
     st.session_state.usd = 0.0
 if "usd_last" not in st.session_state:
     st.session_state.usd_last = 0.0
 
-logger_all.info("Session ID:  %s", st.session_state["session_id"])
+logger_local.info("Session ID:  %s", st.session_state["session_id"])
 logger_local.info("Conversation Thread ID: %s", st.session_state.conversation_thread_id)
 
 collection_name = st.session_state['collection_name']
 
+def update_token_usage(usage_last: dict, token_callback: TokenUsageCallbackHandler):
+    """Update the token usage in the session state vars."""
+    # Total tokens (last) from all sources - callbacks 
+    usage_summary = token_callback.get_usage_dict()
+    total_tokens_all_sources = usage_summary.get("total_tokens", 0)
+
+    # Last interaction tokens
+    st.session_state.total_tokens_last = total_tokens_all_sources
+    st.session_state.input_tokens_last = usage_summary.get("input_tokens", 0)
+    st.session_state.output_tokens_last = usage_summary.get("output_tokens", 0)
+
+    # RAG tokens calculation
+    agent_tokens_dict = usage_last # from process_agent_events - only agents no RAG
+    st.session_state.RAG_total_tokens_last = st.session_state.total_tokens_last - agent_tokens_dict.get("total_tokens", 0)
+    st.session_state.RAG_input_tokens_last = st.session_state.input_tokens_last - agent_tokens_dict.get("input_tokens", 0)
+    st.session_state.RAG_output_tokens_last = st.session_state.output_tokens_last - agent_tokens_dict.get("output_tokens", 0)
+
+    # Session totals
+    st.session_state.total_input_tokens += st.session_state.input_tokens_last
+    st.session_state.total_output_tokens += st.session_state.output_tokens_last
+    st.session_state.total_tokens += st.session_state.total_tokens_last
+    st.session_state.RAG_total_tokens += st.session_state.RAG_total_tokens_last
+    st.session_state.RAG_input_tokens += st.session_state.RAG_input_tokens_last
+    st.session_state.RAG_output_tokens += st.session_state.RAG_output_tokens_last   
+
 # ------------------------------
 # Chroma client helper
 # ------------------------------
-#@lru_cache(maxsize=1)
 @st.cache_resource
 def get_chroma_client(): # default: in-process, no persistence
     """Get or create a Chroma client instance."""
     client = chromadb.Client()
-    logger_all.info("Collections_lru: %s", client.list_collections())
+    logger_local.info("Collections_lru: %s", client.list_collections())
     return client
+
+def clear_db():
+    """Clear the Chroma collection for this session."""
+    if st.button(":blue[Clear DataBase]"):
+        st.session_state["example_loaded"] = False
+        st.session_state.uploaders = []
+        client = get_chroma_client()
+        try:
+            client.delete_collection(collection_name)
+            st.warning("Cleared uploaded files.")
+        except Exception as e:
+            st.warning("No files to be cleared.")
+        logger_all.info("Collections Deleted: %s", client.list_collections())
+        time.sleep(1.5)
+        st.rerun()
 
 # ------------------------------
 # Example PDF helper
@@ -195,7 +251,6 @@ def show_pdf_preview_with_fallback(file_like):
     # First attempt iframe
     ok = show_pdf_iframe_base64(file_like, height=800)
     # Even if ok==True, browser might still block. So show a recommended fallback control:
-    st.markdown("---")
     st.info("If the embedded preview is blocked by your browser, use the image preview below or click 'Open in new tab' to view the full PDF.")
     # Show first-page image always as a robust fallback (optional: show only if user requests)
     try:
@@ -222,7 +277,7 @@ def show_pdf_preview_with_fallback(file_like):
 # Useful to have many sessions with isolated collections. We are not using persistence here, but you could.
 def research_factory(collection_name: str):
     """Factory to create a research tool bound to a specific Chroma collection/session of the user."""
-    def research(query: str) -> str:
+    def research(query: str, callbacks: Callbacks = None) -> str:
         """
         Use Chroma vector store to retrieve and summarize information from the documents (PDFs or TXTs) uploaded by the user, and answer the user's question.
         
@@ -276,39 +331,20 @@ def research_factory(collection_name: str):
         # choose k somewhat larger to increase recall
         retriever = vect.as_retriever(search_kwargs={"k": 4})
 
-        rag_prompt = PromptTemplate.from_template(
-            """
-            You are given a question and a list of document excerpts. Answer using ONLY the provided documents. 
-            Rules:
-            - If an exact answer appears in the documents, quote the exact sentence and give the document source metadata (filename, page or chunk).
-            - If multiple documents show evidence, summarize concisely and cite each source.
-            - If the documents do not contain the answer, respond: "I do not have access to enough resources to answer your question".
-            - Keep the answer short (2-4 sentences) and factual.
-
-            Question:
-            {input}
-
-            Documents:
-            {context}
-            """
-        )
+        rag_prompt = PromptTemplate.from_template(RAG_RETRIEVAL_PROMPT)
 
         llm = ChatGoogleGenerativeAI(model=MODEL)
 
         doc_chain = create_stuff_documents_chain(llm, rag_prompt)
         rag_chain = create_retrieval_chain(retriever, doc_chain)
-
-        callback = UsageMetadataCallbackHandler()
-        config = {"configurable": {"session_id": str(uuid.uuid4())}, "callbacks": [callback]}
-
+        
         try:
             resp = rag_chain.invoke(
-                {"input": query},
-                #config={"configurable": {"session_id": str(uuid.uuid4())}}
-                config=config,
+                {"input": query}, 
+                config={"callbacks": callbacks}
             )
             logger_local.info("RAG CHAIN RESPONSE: %s", repr(resp))
-            logger_local.info("RAG CHAIN CALLBACKS: %s", callback.usage_metadata)
+        
         except Exception as e:
             logger_all.exception("RAG chain invocation failed: %s", e)
             return "I could not run the retrieval chain due to an internal error."
@@ -334,28 +370,7 @@ def research_factory(collection_name: str):
 # ------------------------------
 @st.cache_resource
 def get_prompt():
-    system = SystemMessagePromptTemplate.from_template(
-        """
-        You are a helpful chatbot assistant.
-        You answer user's questions as best as you can, unless the questiions are related to
-        resources (documents in pdfs or txt format) which the user upload in your knowledge base.
-        In order to answer this kind of questions, you have access to a tool named 'research' which allows you to
-        perform a search in these resources to produce an answer.
-        
-        Guidelines for using the tool:
-        - If the user explicitly mentions "document", "uploaded", "in the file", "according to", "in page", "exhibit", or asks to verify or quote something in the uploaded document, you MUST call the 'research' tool.
-        - When you call the tool, use a short function call with the user's question (or your interpretation/summary of it) as the 'query'. 
-        - After the tool returns, answer concisely and include quoted excerpts from the documents used and the source metadata (filename, page or chunk) if available.
-        - If the tool fails or returns no useful information, say: "I do not have access to enough resources to answer your question".
-        
-        Examples of when to call the tool:
-        - "In the PDF I uploaded, does the contract say the buyer pays shipping?" -> call research
-        - "According to the uploaded report, when did X happen?" -> call research
-        - "What is the summary of the document I provided?" -> call research
-        - "According to Y, does the document contain untrue statements?' (where Y is someone mentioned in the uploaded documents) -> call research
-        If the question is general knowledge unrelated to uploaded docs, answer directly without calling the tool.
-        """
-    )
+    system = SystemMessagePromptTemplate.from_template(RAG_AGENT_SYSTEM_PROMPT)
 
     hist = MessagesPlaceholder(variable_name="messages")
     prompt = ChatPromptTemplate.from_messages([system, hist])
@@ -485,20 +500,21 @@ def update_vector_db():
 # ------------------------------
 # Streamlit UI
 # ------------------------------
-st.set_page_config(page_title="PDF Researcher (Chroma)", page_icon="🤖", layout="wide")
-st.title("Agentic PDF Researcher — Chat with Docs")
+st.set_page_config(page_title="Enterprise RAG Agent", page_icon="📄", layout="wide")
+st.title("📄 Enterprise PDFs-RAG Agent: LangGraph + Chroma", anchor=False)
+
 body="""
-## Upload PDF files and chat with their content!
+**Document Intelligence Agent - Powered by Agentic RAG**
 
-This demo showcases an agentic chatbot that can answer questions based on PDF documents you upload.
+This application demonstrates a **Retrieval-Augmented Generation (RAG)** system wrapped in an Agentic framework.
+Unlike linear RAG pipelines, this agent **autonomously decides** when to query the knowledge base based on user intent.
 
-### Goal of the Demo:
-The idea is to demonstrate how to build a document-aware chatbot using:
-- **LangGraph's ReAct agent framework** to manage the agent's reasoning and tool usage.
-- **ChromaDB** as a vector database to store embeddings of the uploaded documents for retrieval.
-- **Google Gemini (via LangChain)** as the LLM for both embedding generation and chat responses.
+**Key Capabilities:**
+*   **🧠 Agentic Decision Making:** The system uses a **ReAct** loop. It doesn't just retrieve; it *thinks* first. If you say "Hi", it replies instantly. If you ask "What's in the contract?", it calls the retrieval tool.
+*   **🔍 Session-Scoped Vector Store:** Uses **ChromaDB** to create isolated, ephemeral embeddings for each user session.
+*   **📏 Granular Observability:** Tracks cost separately for the *Agent's Reasoning* vs. the *Retrieval Process*, allowing for precise ROI calculation of RAG operations.
 """
-with st.expander('About this demo:', expanded=False):
+with st.expander('About this demo (Read me)', expanded=False, ):
     st.markdown(body)
 
 # Chat submission (note: using agent.invoke recommended to extract content)
@@ -515,7 +531,12 @@ if user_query:
     st.session_state.chat_history.append(HumanMessage(content=user_query))
 
     thread_id = st.session_state.conversation_thread_id 
-    config = {"configurable": {"thread_id": thread_id}}
+    token_callback = TokenUsageCallbackHandler()
+
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "callbacks": [token_callback]
+        }
     inputs = {"messages": st.session_state.chat_history}
 
     final_answer_obj = None
@@ -532,20 +553,14 @@ if user_query:
             # 1. Collect all events from the agent in the background
             events = collect_events_from_agent(st.session_state['agent_for_session'], inputs, config=config, timeout=120)
 
+            logger_local.info("COLLECTED EVENTS: %s", events)
+            
             # 2. Process the events with our new, focused parser
             final_answer_obj, trace, usage_last = process_agent_events(events)
 
             # 3. Update session state for UI
             st.session_state.trace = trace
-
-            # 4. Update token counters for both last interaction and total
-            st.session_state.input_tokens_last = usage_last.get("input_tokens", 0)
-            st.session_state.output_tokens_last = usage_last.get("output_tokens", 0)
-            st.session_state.total_tokens_last = usage_last.get("total_tokens", 0)
-
-            st.session_state.total_input_tokens += st.session_state.input_tokens_last
-            st.session_state.total_output_tokens += st.session_state.output_tokens_last
-            st.session_state.total_tokens += st.session_state.total_tokens_last
+            update_token_usage(usage_last, token_callback) 
 
             if final_answer_obj:
                 ai_content = final_answer_obj.content
@@ -594,75 +609,135 @@ if user_query:
 # Sidebar
 # ------------------------------
 with st.sidebar:
-    st.header("Project :green[info]:", divider="rainbow")
-    st.markdown(" ")
-    st.markdown(" ")
-    with st.expander("**Tech stack & How to use:**"):
-        with st.expander("This demo features:"):
-            st.expander("- Embeddings + Chroma DB for RAG").markdown(" (no persistence, isolated sessions)")
-            st.markdown("- LangGraph ReAct agent framework")
-            st.markdown("- Thinking process with Intermediate Steps")
-            st.markdown("- Tokens usage & cost estimation")
-            st.markdown("- Persistent conversation memory (checkpointer)")
-            st.markdown("- Streamlit UI")
-            st.markdown("- Hosted on Render")
-        with st.expander(":blue[How to test it?]"):
-            st.markdown(" You can upload PDF files or use the example PDF, and ask about their content.")
-            st.markdown(" The agent will use the 'research' tool to search the uploaded documents when relevant.")
-            st.markdown("If you use the example PDF, try with the questions like these:")
-            st.markdown("- *'What is a Neural Network, according to the document?'*")
-            st.markdown("- *'Summarize the concept of Transformers as explained in the document'*")
-            st.markdown("If you upload your own PDFs, ask questions related to their content - specifically mentioning 'document', 'uploaded file', 'in the PDF', etc. to trigger the tool usage.")
-    
+    st.header("⚙️ System Architecture", divider="rainbow")
+    st.info("This PoC demonstrates **Agentic RAG** with **Session-Scoped Vector Storage**.")
+
+    # ------------------------------
+    # Info Section
+    # ------------------------------
+    with st.expander("🛠️ Architecture & Tech Stack"):
+        st.markdown("""
+        **Core Orchestration:**
+        - `LangGraph`: Agentic reasoning loop.
+        - `LangChain`: Ingestion pipelines.
+        
+        **Data & Retrieval:**
+        - ***Ingestion:*** `PyPDFLoader` + `RecursiveCharacterTextSplitter`.
+        - ***Vector Store:*** `ChromaDB` (Ephemeral/In-Memory) for session isolation.
+        - ***Embedding Model:*** Google Gemini `text-embedding-004`.
+        
+        **Observability & FinOps:**
+        - ***Cost Attribution:*** Splits token usage between the *Agent* (Reasoning) and the *RAG Chain* (Retrieval).
+        - ***Protocol Trace:*** JSON-level visibility into Tool Inputs/Outputs.
+        - ***Distributed Logging:***  Structured logs (Redis + BetterStack) for remote monitoring.
+        """)
+    with st.expander("🧪 How to Test (Scenarios)"):
+        st.caption("Upload PDFs and try similar inputs to trigger the tool usage:")
+        st.markdown("**1. Specific Extraction (*needs `research` tool*)**:")
+        st.markdown("> *In the PDF I uploaded, what does XXX say about YYY?*")
+        
+        st.markdown("**2. Summarization (*needs `research` tool*)**:")
+        st.markdown("> *Summarize the concept of ZZZ as explained in the document.*")
+
+        st.markdown("**3. General Chat (*no tool*)**:")
+        st.markdown("> *Hello, how are you?*")
+        st.caption("👉 If you ask a general question unrelated to the uploaded docs, the agent should respond directly without invoking the `research` tool.")
+        st.write("#### *👇 Or you can Load the Example PDF below and try questions like these:*")
+        st.markdown("""
+            > *What is a Neural Network, according to the document?*
+            
+            > *Summarize the concept of Transformers as explained in the document*
+            """
+            )
+
+        with st.expander("👀 What to watch"):
+            st.markdown("**1. The Tool Trigger**:")
+            st.caption("👇 *Check the **🧠 Agent's Reasoning Steps** section below*")
+            st.markdown("""
+                        Notice how the agent **decides** whether to call the `research` tool or answer directly. This saves costs on general chit-chat.
+                        """)
+
+            st.markdown("**2. RAG Cost Attribution**:")
+            st.caption("👇 *Check the **📊 Live Metrics** section below*")
+            st.markdown("""
+                        Observe the **(RAG tokens: ...)** metric. This shows exactly how much "context overhead" the document retrieval added to the conversation.
+                        """)
+            
     st.markdown("---")
 
-    st.markdown("### Upload PDF/TXT files")
-    st.session_state.uploaders = st.file_uploader("Upload & click the button", type=["pdf", "txt"], accept_multiple_files=True)        
+    # ------------------------------
+    # Upload PDF Section
+    # ------------------------------
+    st.markdown("### 📂 Knowledge Base")
+    st.session_state.uploaders = st.file_uploader("Upload & click the *Process* button", type=["pdf", "txt"], accept_multiple_files=True)        
     if st.session_state.uploaders:
         if st.button("Process and update vector DB"):
             result_msg = update_vector_db()
             st.success(result_msg)
+            clear_db()
     
     if not st.session_state.get("example_loaded"):
-        st.markdown("##### or use the example_pdf below for testing")
-        if st.button("Use example PDF"):
+        st.markdown("##### or load sample data:")
+        if st.button("Load Example PDF"):
             bio = example_pdf()
             st.session_state["example_loaded"] = True
             st.session_state["example_file"] = bio
             st.success(f"Loaded example: {bio.name}")
-            time.sleep(2)
+            time.sleep(1.5)
             st.rerun()
     if st.session_state.get("example_loaded"):
-        st.expander("##### You can now ask questions about the example PDF! ✅").markdown("Try: *'What is the plate number shown in the document?'*, *'Who is the insured person, in the document?'*")
+        with st.expander("You can now *\"chat\"* with the example PDF! ✅"):
+            st.markdown("Try asking:")
+            st.markdown("""
+                        > *What is a Neural Network, according to the document?*
+                        
+                        > *Summarize the concept of Transformers as explained in the document*
+                        """
+                        )
         if st.button("Preview example pdf"):
             st.markdown(f"##### Preview of {st.session_state['example_file'].name}")
             try:
                 show_pdf_preview_with_fallback(st.session_state["example_file"])
             except Exception as e:
-                st.warning("Could not preview PDF: " + str(e))
+                st.warning("Preview unavailable.")
+        
+        clear_db()
     
     st.markdown("---")
-    st.markdown(" ")
-    with st.expander("Token Usage & Latency:"):
-        st.metric(label=":blue[Latency (s)]", value=f"{st.session_state.latency:.2f}", help="Response time for the last response.")
-        
-        st.markdown("#### :blue[Last Interaction Tokens]")
-        col1, col2 = st.columns(2)
-        col1.metric("Input Tokens", f"{st.session_state.input_tokens_last}")
-        col2.metric("Output Tokens", f"{st.session_state.output_tokens_last}")
-        st.metric("Last Est. Cost ($)", f"${st.session_state.usd_last:.5f}", help="Estimated cost for the last interaction.")
 
-        st.markdown("#### :blue[Session Total Tokens]")
-        col3, col4 = st.columns(2)
-        col3.metric("Total Input", f"{st.session_state.total_input_tokens}")
-        col4.metric("Total Output", f"{st.session_state.total_output_tokens}")
-        st.metric("Total Est. Cost ($)", f"${st.session_state.usd:.5f}", help="Estimated cost for the entire session.")
+    # ------------------------------
+    # Metrics Section
+    # ------------------------------
+    st.subheader("📊 Live Metrics")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric(label=":blue[Latency]", value=f"{st.session_state.latency:.2f}s", help="Time taken to generate the LAST response.")
+    with col2:
+        st.metric(label=":blue[Session Cost]", value=f"${st.session_state.usd:.4f}", help="Estimated cost for the entire session calculated using %.4f per 1K input tokens and %.4f per 1K output tokens" % (COST_PER_1K_INPUT, COST_PER_1K_OUTPUT))
     
-    st.markdown(" ")
-# ------------------------------
-# Safe intermediate steps (trace) - global section visible outside submit
-# ------------------------------
-    st.markdown("Agent's Reasoning Steps:")
+    st.caption("💡 *Metrics update in real-time to track API costs.*")
+    st.caption(f"Token Usage: :blue[{st.session_state.total_tokens}] total tokens used.", help="Total number of tokens consumed in the entire session.")
+
+    with st.expander(":blue[🔎 Token Usage Breakdown:]"):        
+        st.markdown(f"#### :blue[Last Interaction Tokens:] {st.session_state.total_tokens_last} (RAG tokens: {st.session_state.RAG_total_tokens_last})")
+        col1, col2 = st.columns(2)
+        col1.metric("Input Tokens", f"{st.session_state.input_tokens_last} ({st.session_state.RAG_input_tokens_last})")
+        col2.metric("Output Tokens", f"{st.session_state.output_tokens_last} ({st.session_state.RAG_output_tokens_last})")
+        st.metric("Last Est. Cost (USD)", f"${st.session_state.usd_last:.4f}", help="Estimated cost for the last interaction.")
+
+        st.markdown(f"#### :blue[Session Total Tokens:] {st.session_state.total_tokens} (RAG tokens: {st.session_state.RAG_total_tokens})")
+        col3, col4 = st.columns(2)
+        col3.metric("Total Input", f"{st.session_state.total_input_tokens} ({st.session_state.RAG_input_tokens})")
+        col4.metric("Total Output", f"{st.session_state.total_output_tokens} ({st.session_state.RAG_output_tokens})")
+        st.metric("Total Est. Cost (USD)", f"${st.session_state.usd:.4f}", help="Estimated cost for the entire session.")
+
+    st.markdown("---")
+
+    # ------------------------------
+    # Reasoning Steps Section
+    # ------------------------------
+    st.subheader("🧠 Agent's Reasoning Steps:")
     if not st.session_state.trace:
         st.caption("No tool usage in the last turn.")
     else:
@@ -680,24 +755,9 @@ with st.sidebar:
                         st.markdown(obs)
     
     st.markdown("---")
-    
-    st.markdown("### Clear DB")
-    if st.button("Clear uploaded files"):
-        st.session_state["example_loaded"] = False
-        st.session_state.uploaders = []
-        client = get_chroma_client()
-        try:
-            client.delete_collection(collection_name)
-            st.warning("Cleared uploaded files.")
-        except Exception as e:
-            st.warning("No files to be cleared.")
-        logger_all.info("Collections Deleted: %s", client.list_collections())
-        time.sleep(2)
-        st.rerun()
 
-    st.markdown("---")
-    st.markdown("Developed by [Daniele Celsa](https://www.domenicodanielecelsa.com)")
-    st.markdown("Source Code: [GitHub](https://github.com/danielecelsa/pdf-researcher)")
+    st.markdown("[View Source Code](https://github.com/danielecelsa/pdf-researcher) • Developed by **[Daniele Celsa](https://www.domenicodanielecelsa.com)**")
+    st.success("🟢 **System Status:** Hosted on Render • Monitoring Active (Redis + BetterStack)")
 
 # ------------------------------
 # Render chat

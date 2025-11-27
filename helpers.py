@@ -1,6 +1,8 @@
 import json
 from typing import Any, Dict, List, Tuple, Optional
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.outputs import LLMResult 
 import logging
 from streamlit.runtime import get_instance
 from streamlit.runtime.scriptrunner import get_script_run_ctx
@@ -93,3 +95,44 @@ def get_user_info(logger: logging.Logger) -> dict:
         logger.warning(f"Could not get user info from Streamlit headers: {e}")
 
     return user_info
+
+class TokenUsageCallbackHandler(BaseCallbackHandler):
+    """
+    Callback handler per raccogliere i metadati di utilizzo dei token,
+    ispezionando correttamente l'attributo `usage_metadata` sugli AIMessage
+    all'interno dell'oggetto LLMResult.
+    """
+    def __init__(self):
+        super().__init__()
+        # Usiamo una lista per raccogliere i dizionari di metadati da ogni chiamata
+        self.usage_metadata_list = []
+
+    def on_llm_end(self, response: LLMResult, **kwargs: Any) -> Any:
+        """
+        Questo metodo viene chiamato alla fine di OGNI chiamata a un LLM.
+        L'oggetto 'response' è un LLMResult.
+        """
+
+        # Itera attraverso le 'generations'. Solitamente c'è una sola lista di generation per chiamata.
+        for generation_list in response.generations:
+            for generation in generation_list:
+                # La 'generation' contiene il messaggio finale (AIMessage).
+                # Verifichiamo che il messaggio esista e abbia l'attributo 'usage_metadata'.
+                if hasattr(generation, 'message') and hasattr(generation.message, 'usage_metadata'):
+                    metadata = generation.message.usage_metadata
+                    if metadata:
+                        self.usage_metadata_list.append(metadata)
+
+    def get_usage_dict(self) -> dict:
+        """Calcola i totali per input, output e token complessivi."""
+        total_input = 0
+        total_output = 0
+        for metadata in self.usage_metadata_list:
+            total_input += metadata.get("input_tokens", 0)
+            total_output += metadata.get("output_tokens", 0)
+        
+        return {
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "total_tokens": total_input + total_output
+        }
