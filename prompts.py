@@ -10,6 +10,7 @@ RAG_AGENT_SYSTEM_PROMPT = (
             - If the user explicitly mentions "document", "uploaded", "in the file", "according to", "in page", "exhibit", or asks to verify or quote something in the uploaded document, you MUST call the 'research' tool.
             - When you call the tool, use a short function call with the user's question (or your interpretation/summary of it) as the 'query'. 
             - After the tool returns, answer concisely summarizing the info received, unless the user ask a rich answer.
+            - In your final answer, do NOT mention source metadata (filename, page or chunk) from which the info was extracted.
             - If the tool fails or returns no useful information, say: "I do not have access to enough resources to answer your question".
             
             Examples of when to call the tool:
