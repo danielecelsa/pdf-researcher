@@ -500,8 +500,8 @@ def update_vector_db():
 # ------------------------------
 # Streamlit UI
 # ------------------------------
-st.set_page_config(page_title="Enterprise RAG Agent", page_icon="📄", layout="wide")
-st.title("📄 Enterprise PDFs-RAG Agent: LangGraph + Chroma", anchor=False)
+st.set_page_config(page_title="Agentic RAG System", page_icon="📄", layout="wide")
+st.title("📄 Agentic RAG System: LangGraph + Chroma", anchor=False)
 
 body="""
 **Document Intelligence Agent - Powered by Agentic RAG**
@@ -513,6 +513,7 @@ Unlike linear RAG pipelines, this agent **autonomously decides** when to query t
 *   **🧠 Agentic Decision Making:** The system uses a **ReAct** loop. It doesn't just retrieve; it *thinks* first. If you say "Hi", it replies instantly. If you ask "What's in the contract?", it calls the retrieval tool.
 *   **🔍 Session-Scoped Vector Store:** Uses **ChromaDB** to create isolated, ephemeral embeddings for each user session.
 *   **📏 Granular Observability:** Tracks cost separately for the *Agent's Reasoning* vs. the *Retrieval Process*, allowing for precise ROI calculation of RAG operations.
+*   **💰 Token Economy:** By deciding *not* to retrieve data for general chit-chat, the agent saves significant token costs compared to naive RAG pipelines.
 """
 with st.expander('About this demo (Read me)', expanded=False, ):
     st.markdown(body)
@@ -627,7 +628,7 @@ with st.sidebar:
         - ***Embedding Model:*** Google Gemini `text-embedding-004`.
         
         **Observability & FinOps:**
-        - ***Cost Attribution:*** Splits token usage between the *Agent* (Reasoning) and the *RAG Chain* (Retrieval).
+        - ***Granular Cost Attribution:*** Distinguishes between *Reasoning Cost* (The Agent) and *Retrieval Context Cost* (The RAG Chain) for precise ROI calculation..
         - ***Protocol Trace:*** JSON-level visibility into Tool Inputs/Outputs.
         - ***Distributed Logging:***  Structured logs (Redis + BetterStack) for remote monitoring.
         """)
