@@ -66,13 +66,13 @@ if os.getenv("RENDER") != "true":
 # Configuration
 # ------------------------------
 MODEL = os.environ.get("GENAI_MODEL", "gemini-2.5-flash")
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY_2")
 
 LOG_DIR = Path(os.environ.get("CHAT_LOG_DIR", "./logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-COST_PER_1K_INPUT = float(os.getenv("COST_PER_1K_TOKENS_USD_INPUT", "0.002"))
-COST_PER_1K_OUTPUT = float(os.getenv("COST_PER_1K_TOKENS_USD_OUTPUT", "0.002"))
+COST_PER_1K_INPUT = float(os.getenv("COST_PER_1K_TOKENS_USD_INPUT", "0.0002"))
+COST_PER_1K_OUTPUT = float(os.getenv("COST_PER_1K_TOKENS_USD_OUTPUT", "0.0002"))
 
 SAMPLE_PDF_PATH = "example_docs/llm_introduction.pdf"
 
@@ -90,7 +90,7 @@ logger_all = get_logger("all")
 if "conversation_thread_id" not in st.session_state:
     st.session_state.conversation_thread_id = str(uuid.uuid4())
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = [AIMessage(content="Hello, I am your personal chatbot. I can answer general knowledge questions, or document-related if you upload files. How can I help you?")]
+    st.session_state.chat_history = [AIMessage(content="Hello, I am your personal chatbot!  \nI can answer general knowledge questions, or document-related if you upload files. How can I help you?")]
 if "uploaders" not in st.session_state:
     st.session_state.uploaders = []
 if "example_loaded" not in st.session_state: # to avoid reloading example multiple times
@@ -312,6 +312,7 @@ def research_factory(collection_name: str):
             asyncio.set_event_loop(loop)
 
         embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        #embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
 
         # Create the Chroma vectorstore from the existing collection
         client = get_chroma_client()  # in-process ephemeral
@@ -454,6 +455,7 @@ def update_vector_db():
         asyncio.set_event_loop(loop)
 
     embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+    #embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
 
     raw_docs = []
     for f in st.session_state.uploaders:
@@ -720,7 +722,7 @@ with st.sidebar:
     with col1:
         st.metric(label=":blue[Latency]", value=f"{st.session_state.latency:.2f}s", help="Time taken to generate the LAST response.")
     with col2:
-        st.metric(label=":blue[Session Cost]", value=f"${st.session_state.usd:.4f}", help="Estimated cost for the entire session calculated using %.4f per 1K input tokens and %.4f per 1K output tokens" % (COST_PER_1K_INPUT, COST_PER_1K_OUTPUT))
+        st.metric(label=":blue[Session Cost]", value=f"${st.session_state.usd:.5f}", help="Estimated cost for the entire session calculated using %.4f per 1K input tokens and %.4f per 1K output tokens" % (COST_PER_1K_INPUT, COST_PER_1K_OUTPUT))
     
     st.caption("💡 *Metrics update in real-time to track API costs.*")
     st.caption(f"Token Usage: :blue[{st.session_state.total_tokens}] total tokens used.", help="Total number of tokens consumed in the entire session.")
@@ -730,13 +732,13 @@ with st.sidebar:
         col1, col2 = st.columns(2)
         col1.metric("Input Tokens", f"{st.session_state.input_tokens_last} ({st.session_state.RAG_input_tokens_last})")
         col2.metric("Output Tokens", f"{st.session_state.output_tokens_last} ({st.session_state.RAG_output_tokens_last})")
-        st.metric("Last Est. Cost (USD)", f"${st.session_state.usd_last:.4f}", help="Estimated cost for the last interaction.")
+        st.metric("Last Est. Cost (USD)", f"${st.session_state.usd_last:.5f}", help="Estimated cost for the last interaction.")
 
         st.markdown(f"#### :blue[Session Total Tokens:] {st.session_state.total_tokens} (RAG tokens: {st.session_state.RAG_total_tokens})")
         col3, col4 = st.columns(2)
         col3.metric("Total Input", f"{st.session_state.total_input_tokens} ({st.session_state.RAG_input_tokens})")
         col4.metric("Total Output", f"{st.session_state.total_output_tokens} ({st.session_state.RAG_output_tokens})")
-        st.metric("Total Est. Cost (USD)", f"${st.session_state.usd:.4f}", help="Estimated cost for the entire session.")
+        st.metric("Total Est. Cost (USD)", f"${st.session_state.usd:.5f}", help="Estimated cost for the entire session.")
 
     st.markdown("---")
 
