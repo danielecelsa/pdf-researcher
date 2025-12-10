@@ -311,18 +311,18 @@ def research_factory(collection_name: str):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-        #embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
-
+        #embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=GOOGLE_API_KEY)
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=GOOGLE_API_KEY)
+    
         # Create the Chroma vectorstore from the existing collection
         client = get_chroma_client()  # in-process ephemeral
         logger_all.info("Collections_tool: %s ", collection_name)
         logger_local.info("Collections_tool_list: %s", client.list_collections())
         vect = Chroma(collection_name=collection_name, embedding_function=embeddings, client=client)
 
-        # fai una similarity search di debug per vedere se la collection esiste e quanti risultati
+        # try a similarity search for debug to see if the collection exists and how many results
         try:
-            # debug: prova similarity_search_with_score
+            # debug: try similarity_search_with_score
             top = vect.similarity_search_with_score(query, k=8)
             logger_all.info("Retrieved %d hits for query", len(top))
             for i, (doc, score) in enumerate(top):
@@ -339,7 +339,7 @@ def research_factory(collection_name: str):
 
         rag_prompt = PromptTemplate.from_template(RAG_RETRIEVAL_PROMPT)
 
-        llm = ChatGoogleGenerativeAI(model=MODEL)
+        llm = ChatGoogleGenerativeAI(model=MODEL, google_api_key=GOOGLE_API_KEY, temperature=0.2, transport="rest")
 
         doc_chain = create_stuff_documents_chain(llm, rag_prompt)
         rag_chain = create_retrieval_chain(retriever, doc_chain)
@@ -454,8 +454,8 @@ def update_vector_db():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-    #embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+    #embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=GOOGLE_API_KEY)
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=GOOGLE_API_KEY)
 
     raw_docs = []
     for f in st.session_state.uploaders:
