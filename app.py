@@ -1,5 +1,4 @@
 # app.py
-# main application file for the Streamlit app
 # Implements a chatbot that can answer questions based on uploaded PDF/TXT documents using LangGraph, LangChain, ChromaDB, and Google Gemini.
 
 print("=== PRINT FROM PROCESS START ===")
@@ -91,8 +90,6 @@ if "conversation_thread_id" not in st.session_state:
     st.session_state.conversation_thread_id = str(uuid.uuid4())
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = [AIMessage(content="Hello, I am your personal chatbot!  \nI can answer general knowledge questions, or document-related if you upload files. How can I help you?")]
-if "uploaders" not in st.session_state:
-    st.session_state.uploaders = []
 if "example_loaded" not in st.session_state: # to avoid reloading example multiple times
     st.session_state["example_loaded"] = False
 if "example_file" not in st.session_state:
@@ -144,6 +141,11 @@ if "usd_last" not in st.session_state:
 logger_local.info("Session ID:  %s", st.session_state["session_id"])
 logger_local.info("Conversation Thread ID: %s", st.session_state.conversation_thread_id)
 
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0 # Counter to reset uploader widget
+if "db_has_content" not in st.session_state:
+    st.session_state.db_has_content = False # Flag to know if the DB is populated
+
 if 'tour_completed' not in st.session_state:
     st.session_state['tour_completed'] = False
 
@@ -185,37 +187,28 @@ def get_chroma_client(): # default: in-process, no persistence
     logger_local.info("Collections_lru: %s", client.list_collections())
     return client
 
-def clear_db():
-    """Clear the Chroma collection for this session."""
-    if st.button(":blue[Clear DataBase]"):
-        st.session_state["example_loaded"] = False
-        st.session_state.uploaders = []
-        client = get_chroma_client()
-        try:
-            client.delete_collection(collection_name)
-            st.warning("Cleared uploaded files.")
-        except Exception as e:
-            st.warning("No files to be cleared.")
-        logger_all.info("Collections Deleted: %s", client.list_collections())
-        time.sleep(1.5)
-        st.rerun()
+def reset_uploader():
+    """Increment key to force Streamlit to recreate the file uploader widget empty."""
+    st.session_state.uploader_key += 1
+    st.rerun()
 
 # ------------------------------
 # Example PDF helper
 # ------------------------------
 def example_pdf():
-    # Load a sample PDF from disk and add to session_state.uploaders
+    # Load a sample PDF from disk
     if not os.path.exists(SAMPLE_PDF_PATH):
         st.error(f"Sample file not found at: {SAMPLE_PDF_PATH}")
+        return None
     else:
         with open(SAMPLE_PDF_PATH, "rb") as f:
             data = f.read()
         bio = io.BytesIO(data)
-        bio.name = os.path.basename(SAMPLE_PDF_PATH)  # important: use .name as metadata
+        bio.name = os.path.basename(SAMPLE_PDF_PATH)
         bio.seek(0)
-        st.session_state["uploaders"] = [bio]
-        update_vector_db()
-    return bio
+        # Do not touch st.session_state["uploaders"] anymore
+        # Do not call update_vector_db() here anymore
+        return bio
 
 def show_pdf_iframe_base64(file_like, height=800):
     """Try to render PDF inside an iframe using a data: URI.
@@ -442,10 +435,10 @@ if 'agent_for_session' not in st.session_state:
 # ------------------------------
 # Update vector DB using Chroma
 # ------------------------------
-def update_vector_db():
+def update_vector_db(uploaded_files):
     """Update the vector database with newly uploaded documents (Chroma)."""
-    if not st.session_state.uploaders:
-        return "No files uploaded."
+    if not uploaded_files:
+        return False
 
     # ensure event loop for embeddings init
     try:
@@ -454,54 +447,64 @@ def update_vector_db():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    #embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=GOOGLE_API_KEY)
     embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=GOOGLE_API_KEY)
 
     raw_docs = []
-    for f in st.session_state.uploaders:
-        # write temp file and load via PyPDFLoader
-        if f.name.lower().endswith(".pdf"):
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(f.read())
-                tmp_path = tmp.name
-            loader = PyPDFLoader(tmp_path)
-            docs = loader.load()
-            # attach source metadata
-            for d in docs:
-                d.metadata = d.metadata or {}
-                d.metadata["source"] = f.name
-            raw_docs.extend(docs)
-        elif f.name.lower().endswith(".txt"):
-            content = f.read().decode("utf-8") if hasattr(f, "read") else f
-            raw_docs.append(Document(page_content=content, metadata={"source": f.name}))
+    
+    # Iterate on files passed as argument
+    for f in uploaded_files:
+        try:
+            # write temp file and load via PyPDFLoader
+            if f.name.lower().endswith(".pdf"):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(f.read())
+                    tmp_path = tmp.name
 
+                try:
+                    loader = PyPDFLoader(tmp_path)
+                    docs = loader.load()
+                    # attach source metadata
+                    for d in docs:
+                        d.metadata = d.metadata or {}
+                        d.metadata["source"] = f.name
+                    raw_docs.extend(docs)
+                except Exception as e:
+                    # PDF Corrupted: Log the error but do not interrupt everything
+                    st.error(f"❌ Error with file '{f.name}': The file might be corrupted or invalid. Details: {e}")
+                    # We do not do a silent 'continue', but the user will see the error.
+                    continue 
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+
+            elif f.name.lower().endswith(".txt"):
+                content = f.read().decode("utf-8") if hasattr(f, "read") else f
+                raw_docs.append(Document(page_content=content, metadata={"source": f.name}))
+        
+        except Exception as e:
+            st.error(f"Generic error processing {f.name}: {e}")
+    
     if not raw_docs:
-        return "No docs extracted from uploads."
+        # If we are here, either there were no files, or they were all corrupted
+        st.warning("No valid documents extracted. Vector DB was not updated.")
+        return False
 
-    # split
+    # Split and Load into Chroma
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     final_docs = text_splitter.split_documents(raw_docs)
 
-    # Create or update Chroma collection
     chroma_client = get_chroma_client()
     emb_chroma = create_langchain_embedding(embeddings)
     coll = chroma_client.get_or_create_collection(name=collection_name, embedding_function=emb_chroma)
-    # Create stable ids (helpful to later delete by ids/source)
+    
     ids = [f"{collection_name}::{uuid.uuid4()}" for _ in final_docs]
     coll.add(ids=ids, documents=[d.page_content for d in final_docs], metadatas=[d.metadata for d in final_docs])
-    logger_all.info("Collections: %s", chroma_client.list_collections())
-    cols = chroma_client.get_collection(collection_name)
-    logger_local.info("Count: %d", cols.count())
+    
+    files_count = len(uploaded_files)
+    logger_all.info("Created/Updated Chroma collection with %d files, %d documents.", files_count, len(raw_docs))
 
-
-    files = len(st.session_state.uploaders)
-
-    logger_all.info("Created/Updated Chroma collection with %d files, %d documents and %d chunks.", files, len(raw_docs), len(docs))
-
-    # Optionally clear uploaders after processing to avoid reprocessing duplicates
-    st.session_state.uploaders = []
-
-    return f"Processed {files} files and updated vector DB with {len(raw_docs)} documents and {len(docs)} chunks."
+    st.success(f"✅ Processed {files_count} files. Vector DB updated with {len(raw_docs)} chunks.")
+    return True
 
 
 # ------------------------------
@@ -674,43 +677,109 @@ with st.sidebar:
     st.markdown("---")
 
     # ------------------------------
-    # Upload PDF Section
+    # Upload PDF Section 
     # ------------------------------
     st.markdown("### 📂 Knowledge Base")
-    st.session_state.uploaders = st.file_uploader("Upload & click the *Process* button", type=["pdf", "txt"], accept_multiple_files=True)        
-    if st.session_state.uploaders:
-        if st.button("Process and update vector DB"):
-            result_msg = update_vector_db()
-            st.success(result_msg)
-            clear_db()
     
-    if not st.session_state.get("example_loaded"):
+    # 1. INSPECT DB (DEBUGGER) - Useful for understanding what is really happening
+    if st.toggle("Show DB Stats (Debug)"):
+        try:
+            client_debug = get_chroma_client()
+            try:
+                col_debug = client_debug.get_collection(collection_name)
+                cnt = col_debug.count()
+                st.caption(f"📚 Documents in DB: **{cnt}**")
+                st.caption(f"🗃️ Collection Name: `{collection_name}`")
+            except Exception:
+                st.caption("Testing: No collection found yet.")
+        except Exception as e:
+            st.error(f"Debug Error: {e}")
+
+    # 2. UPLOADER WITH DYNAMIC KEY
+    # We use a local variable 'uploaded_files' instead of writing directly to session_state.uploaders
+    # The key=... trick allows us to reset it.
+    uploaded_files = st.file_uploader(
+        "Upload & click the *Process* button", 
+        type=["pdf", "txt"], 
+        accept_multiple_files=True,
+        key=f"uploader_{st.session_state.uploader_key}" 
+    )
+
+    # 3. PROCESSING LOGIC
+    if uploaded_files:
+        if st.button("Process and update vector DB"):
+            # Call the update function passing the files
+            success = update_vector_db(uploaded_files)
+            
+            if success:
+                # If everything went well, mark that the DB has data
+                st.session_state.db_has_content = True
+                # Reset the uploader (removes files and buttons)
+                time.sleep(1) # A small delay to let the user read the success message
+                reset_uploader()
+            else:
+                # If there was an error (e.g., corrupted file or no doc extracted)
+                # Should we still reset the uploader to remove the bad file from view?
+                # Yes, the user has seen the red error generated by the function.
+                time.sleep(2) # A small delay to let the user read the error message
+                reset_uploader()
+    
+    # 4. EXAMPLE PDF MANAGEMENT
+    if not st.session_state.get("example_loaded") and not st.session_state.db_has_content:
         st.markdown("##### or load sample data:")
         if st.button("Load Example PDF"):
             bio = example_pdf()
-            st.session_state["example_loaded"] = True
-            st.session_state["example_file"] = bio
-            st.success(f"Loaded example: {bio.name}")
-            time.sleep(1.5)
-            st.rerun()
+            if bio:
+                # Now pass the file explicitly to the new update_vector_db
+                # Note: the function expects a list, so we put [bio]
+                update_vector_db([bio]) 
+                
+                st.session_state["example_loaded"] = True
+                st.session_state["example_file"] = bio
+                st.session_state.db_has_content = True
+                st.success(f"Loaded example: {bio.name}")
+                time.sleep(1)
+                st.rerun()
+
+    # 5. PREVIEW EXAMPLE (Only if loaded)
     if st.session_state.get("example_loaded"):
         with st.expander("You can now *\"chat\"* with the example PDF! ✅"):
-            st.markdown("Try asking:")
+            st.caption("👉 Try asking:")
             st.markdown("""
                         > *What is a Neural Network, according to the document?*
                         
                         > *Summarize the concept of Transformers as explained in the document*
                         """
                         )
-        if st.button("Preview example pdf"):
-            st.markdown(f"##### Preview of {st.session_state['example_file'].name}")
-            try:
-                show_pdf_preview_with_fallback(st.session_state["example_file"])
-            except Exception as e:
-                st.warning("Preview unavailable.")
         
-        clear_db()
-    
+        if st.button("Preview example pdf"):
+             st.caption(f"👇 Preview of: {st.session_state['example_file'].name}")
+             # ... existing preview code ...
+             try:
+                show_pdf_preview_with_fallback(st.session_state["example_file"])
+             except Exception:
+                pass
+
+    # 6. CLEAR DATABASE BUTTON (Redone)
+    # Show the button ONLY if the DB has content (flag) or if the example is loaded.
+    # Independent of the uploader.
+    if st.session_state.db_has_content or st.session_state.get("example_loaded"):
+        st.markdown("---")
+        if st.button("🗑️ :blue[Clear Database]"):
+            client = get_chroma_client()
+            try:
+                client.delete_collection(collection_name)
+                st.toast("Database cleared!", icon="🗑️")
+            except Exception:
+                st.warning("Collection was already empty.")
+            
+            # Reset all states
+            st.session_state.db_has_content = False
+            st.session_state["example_loaded"] = False
+            
+            # Also reset the uploader widget for safety
+            reset_uploader()
+
     st.markdown("---")
 
     # ------------------------------
