@@ -26,16 +26,21 @@ RAG_RETRIEVAL_PROMPT = (
             """
             You are given a question and a list of document excerpts. Answer using ONLY the provided documents. 
             Rules:
-            - If an exact answer appears in the documents, quote the exact sentence and give the document source metadata (filename, page or chunk).
-            - If multiple documents show evidence, summarize concisely and cite each source.
+            - If an exact answer appears in the documents, quote the exact sentence.
+            - If multiple documents show evidence, summarize concisely.
             - If the documents do not contain the answer, respond: "I do not have access to enough resources to answer your question".
             - Keep the answer short (2-4 sentences) and factual.
+
+            Context (Retrieved Documents):
+            {context}
 
             Question:
             {input}
 
-            Documents:
-            {context}
+            Answer:
+
             """
             )
+
+
 

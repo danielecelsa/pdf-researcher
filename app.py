@@ -1,7 +1,5 @@
 # app.py
-# Implements a chatbot that can answer questions based on uploaded PDF/TXT documents using LangGraph, LangChain, ChromaDB, and Google Gemini.
-
-print("=== PRINT FROM PROCESS START ===")
+# Implements a chatbot that can answer questions based on uploaded PDF/TXT documents using LangGraph, LangChain, ChromaDB, BM25 and Google Gemini.
 
 # ------------------------------
 # Imports
@@ -28,6 +26,9 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, SystemMessagePromptTemplate, HumanMessagePromptTemplate, PromptTemplate
 from langchain_community.document_loaders import PyPDFLoader 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.retrievers import BM25Retriever
+from langchain.retrievers import EnsembleRetriever, ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import FlashrankRerank
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains import create_retrieval_chain
 from langchain_core.documents import Document
@@ -84,8 +85,7 @@ logger_betterstack = get_logger("betterstack")
 logger_redis = get_logger("redis")
 logger_all = get_logger("all") 
 
-
-# Initialize Streamllit session state variables
+# Initialize Streamlit session state variables
 if "conversation_thread_id" not in st.session_state:
     st.session_state.conversation_thread_id = str(uuid.uuid4())
 if "chat_history" not in st.session_state:
@@ -138,6 +138,7 @@ if "usd" not in st.session_state:
 if "usd_last" not in st.session_state:
     st.session_state.usd_last = 0.0
 
+
 logger_local.info("Session ID:  %s", st.session_state["session_id"])
 logger_local.info("Conversation Thread ID: %s", st.session_state.conversation_thread_id)
 
@@ -178,7 +179,7 @@ def update_token_usage(usage_last: dict, token_callback: TokenUsageCallbackHandl
     st.session_state.RAG_output_tokens += st.session_state.RAG_output_tokens_last   
 
 # ------------------------------
-# Chroma client helper
+# Helpers
 # ------------------------------
 @st.cache_resource
 def get_chroma_client(): # default: in-process, no persistence
@@ -191,6 +192,12 @@ def reset_uploader():
     """Increment key to force Streamlit to recreate the file uploader widget empty."""
     st.session_state.uploader_key += 1
     st.rerun()
+
+# --- THREAD-SAFE GLOBAL STORE FOR BM25 ---
+@st.cache_resource
+def get_bm25_store():
+    # This dictionary lives in the global memory of the server
+    return {} # Structure: { session_id: [List of Documents] }
 
 # ------------------------------
 # Example PDF helper
@@ -206,8 +213,6 @@ def example_pdf():
         bio = io.BytesIO(data)
         bio.name = os.path.basename(SAMPLE_PDF_PATH)
         bio.seek(0)
-        # Do not touch st.session_state["uploaders"] anymore
-        # Do not call update_vector_db() here anymore
         return bio
 
 def show_pdf_iframe_base64(file_like, height=800):
@@ -273,20 +278,17 @@ def show_pdf_preview_with_fallback(file_like):
 # TOOL: research (uses Chroma)
 # ------------------------------
 # Useful to have many sessions with isolated collections. We are not using persistence here, but you could.
-def research_factory(collection_name: str):
+def research_factory(collection_name: str, session_id: str):
     """Factory to create a research tool bound to a specific Chroma collection/session of the user."""
     def research(query: str, callbacks: Callbacks = None) -> str:
         """
-        Use Chroma vector store to retrieve and summarize information from the documents (PDFs or TXTs) uploaded by the user, and answer the user's question.
+        Use this tool to retrieve and summarize information from the documents (PDFs or TXTs) uploaded by the user, and answer the user's question.
         
         Use this tool whenever the user's question involves the uploaded documents,
         even if the question is only partially related to their content.
         Do not use this tool for general knowledge questions unrelated to the uploaded documents.
-        
-        This tool will:
-        - create the embeddings object (safely)
-        - create a vectorstore from a Chroma collection, which contains the uploaded documents
-        - use retriever to get top-k, run RAG chain and return a concise answer
+
+        Uses Hybrid Search (Vector + Keyword) and Reranking for high accuracy.
 
         Args:
             query (str): The user question to be answered using only the uploaded documents.
@@ -304,63 +306,81 @@ def research_factory(collection_name: str):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
-        #embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=GOOGLE_API_KEY)
+        # 1. SETUP EMBEDDINGS (With explicit Key)
         embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=GOOGLE_API_KEY)
     
-        # Create the Chroma vectorstore from the existing collection
+        # 2. SETUP VECTOR RETRIEVER (Chroma)n
         client = get_chroma_client()  # in-process ephemeral
         logger_all.info("Collections_tool: %s ", collection_name)
         logger_local.info("Collections_tool_list: %s", client.list_collections())
         vect = Chroma(collection_name=collection_name, embedding_function=embeddings, client=client)
 
-        # try a similarity search for debug to see if the collection exists and how many results
-        try:
-            # debug: try similarity_search_with_score
-            top = vect.similarity_search_with_score(query, k=8)
-            logger_all.info("Retrieved %d hits for query", len(top))
-            for i, (doc, score) in enumerate(top):
-                src = doc.metadata.get("source", doc.metadata.get("filename", "unknown"))
-                excerpt = doc.page_content[:200].replace("\n", " ")
-                logger_local.info("RANK %d score=%.4f source=%s excerpt=%s", i, score, src, excerpt)
-        except Exception as e:
-            logger_all.exception("Similarity search failed: %s", e)
-            return "I could not search the vector DB."
+        # Define Base Retriever (Chroma) with k=10 for wide recall
+        chroma_retriever = vect.as_retriever(search_kwargs={"k": 5})
 
-        # Build retriever and RAG chain
-        # choose k somewhat larger to increase recall
-        retriever = vect.as_retriever(search_kwargs={"k": 4})
+        # 3. SETUP HYBRID SEARCH (Ensemble with BM25)
+        # --- FIX: Use Global Store and the session_id "captured" by the closure ---
+        bm25_store = get_bm25_store()
+        current_docs = bm25_store.get(session_id, []) # Read from the global dictionary
+
+        if current_docs:
+            logger_local.info("Building BM25 Index from %d chunks (Global Store)...", len(current_docs))
+            bm25_retriever = BM25Retriever.from_documents(current_docs)
+            bm25_retriever.k = 5
+            
+            ensemble_retriever = EnsembleRetriever(
+                retrievers=[bm25_retriever, chroma_retriever], 
+                weights=[0.5, 0.5]
+            )
+            base_retriever = ensemble_retriever
+            logger_local.info("✅ Hybrid Search Activated (BM25 + Chroma)")
+        else:
+            # If no docs for BM25, fallback to pure vector search
+            base_retriever = chroma_retriever
+            logger_local.warning(f"⚠️ BM25 docs missing for session {session_id}. Using pure Vector Search.")
+
+        # 4. SETUP RERANKER (FlashRank)
+        # Compresses 10 candidates down to Top 5
+        compressor = FlashrankRerank(
+            model="ms-marco-MiniLM-L-12-v2",
+            top_n=5)
+        compression_retriever = ContextualCompressionRetriever(
+            base_compressor=compressor, 
+            base_retriever=base_retriever
+        )
 
         rag_prompt = PromptTemplate.from_template(RAG_RETRIEVAL_PROMPT)
 
+        # 6. LLM (Explicit Key)
         llm = ChatGoogleGenerativeAI(model=MODEL, google_api_key=GOOGLE_API_KEY, temperature=0.2, transport="rest")
 
         doc_chain = create_stuff_documents_chain(llm, rag_prompt)
-        rag_chain = create_retrieval_chain(retriever, doc_chain)
+        rag_chain = create_retrieval_chain(compression_retriever, doc_chain)
         
         try:
+            # Execute Chain
             resp = rag_chain.invoke(
                 {"input": query}, 
                 config={"callbacks": callbacks}
             )
-            logger_local.info("RAG CHAIN RESPONSE: %s", repr(resp))
-        
-        except Exception as e:
-            logger_all.exception("RAG chain invocation failed: %s", e)
-            return "I could not run the retrieval chain due to an internal error."
-
-        # Normalize response
-        try:
+            # Log the final reranked context
+            if "context" in resp:
+                logger_local.info("--- FINAL RERANKED CONTEXT ---")
+                for i, doc in enumerate(resp["context"]):
+                    logger_local.info(f"RERANKED #{i+1}: {doc.page_content[:60]}...")
+            
+            # Normalize response
             if isinstance(resp, dict):
                 result = resp.get("answer") or resp.get("text") or str(resp)
                 logger_local.info("Tool's answer: %s", result)
                 return result
-            result = str(resp)
             logger_local.info("Tool's answer (fallback): %s", result)
-            return result
+            return str(resp)
         
         except Exception as e:
-            logger_all.exception("Error extracting result from RAG response: %s", e)
-            return "I could not parse the result from the retrieval chain."
+            logger_all.exception("RAG chain invocation failed: %s", e)
+            return "I could not run the retrieval chain due to an internal error."
+    
     return research
 
 
@@ -383,7 +403,7 @@ def get_llm():
             google_api_key=GOOGLE_API_KEY,
             temperature=0.2,
             safety_settings=None,
-            transport="rest" # if not working, just use python 3.11 (not 3.13)
+            transport="rest"
         )
     except Exception as e:
         logger_all.exception("Could not initialize LLM: %s", e)
@@ -403,9 +423,9 @@ def get_checkpointer():
             checkpointer = None
     return checkpointer
 
-def build_agent(collection_name):
+def build_agent(collection_name, session_id):
 
-    research_tool_function = research_factory(collection_name)
+    research_tool_function = research_factory(collection_name, session_id)
 
     tools = [
         StructuredTool.from_function(
@@ -414,7 +434,7 @@ def build_agent(collection_name):
             description=(
                 "Use this tool to answer questions that require information from the uploaded PDF/text documents. "
                 "Always call this tool when the user's question refers to facts, dates, quotes, or content contained in the uploaded files."
-                "The tool accepts a single string question and returns a concise, evidence-based answer including sources when possible."
+                "The tool accepts a single string question and returns a concise, evidence-based answer."
             ),
         )
     ]
@@ -429,14 +449,17 @@ def build_agent(collection_name):
     return agent
 
 if 'agent_for_session' not in st.session_state:
-    st.session_state['agent_for_session'] = build_agent(st.session_state['collection_name'])
+    st.session_state['agent_for_session'] = build_agent(
+        st.session_state['collection_name'],
+        st.session_state['session_id']
+    )
 
 
 # ------------------------------
 # Update vector DB using Chroma
 # ------------------------------
 def update_vector_db(uploaded_files):
-    """Update the vector database with newly uploaded documents (Chroma)."""
+    """Update the vector database (Chroma) AND Session State (BM25) with newly uploaded documents"""
     if not uploaded_files:
         return False
 
@@ -490,20 +513,45 @@ def update_vector_db(uploaded_files):
         return False
 
     # Split and Load into Chroma
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
     final_docs = text_splitter.split_documents(raw_docs)
 
+    # Save docs for BM25
+    session_id = st.session_state.session_id
+    bm25_store = get_bm25_store()
+
+    if session_id not in bm25_store:
+        bm25_store[session_id] = []
+
+    bm25_store[session_id].extend(final_docs)
+
+    # STORE FOR VECTORS (Chroma)
     chroma_client = get_chroma_client()
     emb_chroma = create_langchain_embedding(embeddings)
     coll = chroma_client.get_or_create_collection(name=collection_name, embedding_function=emb_chroma)
-    
-    ids = [f"{collection_name}::{uuid.uuid4()}" for _ in final_docs]
-    coll.add(ids=ids, documents=[d.page_content for d in final_docs], metadatas=[d.metadata for d in final_docs])
-    
-    files_count = len(uploaded_files)
-    logger_all.info("Created/Updated Chroma collection with %d files, %d documents.", files_count, len(raw_docs))
 
-    st.success(f"✅ Processed {files_count} files. Vector DB updated with {len(raw_docs)} chunks.")
+    # Batch processing to avoid rate limits (even with tier 1, good practice)
+    batch_size = 20 # Bigger because of Tier 1
+    total_docs = len(final_docs)
+
+    # Optional progress bar
+    progress_bar= st.progress(0)
+    
+    for i in range(0, total_docs, batch_size):
+        batch = final_docs[i : i + batch_size]
+        ids = [f"{collection_name}::{uuid.uuid4()}" for _ in batch]
+        coll.add(ids=ids, documents=[d.page_content for d in batch], metadatas=[d.metadata for d in batch])
+        # Update progress
+        progress_bar.progress(min((i + batch_size) / total_docs, 1.0))
+        time.sleep(0.3)
+    
+    # Clean up progress bar
+    progress_bar.empty()
+
+    files_count = len(uploaded_files)
+    logger_all.info("Updated Chroma & BM25 List with %d files, %d chunks.", files_count, len(final_docs))
+
+    st.success(f"✅ Processed {files_count} files. DB updated with {len(final_docs)} chunks (Hybrid Search Ready).")
     return True
 
 
@@ -516,12 +564,13 @@ st.title("📄 Agentic RAG System: LangGraph + Chroma", anchor=False)
 body="""
 **Document Intelligence Agent - Powered by Agentic RAG**
 
-This application demonstrates a **Retrieval-Augmented Generation (RAG)** system wrapped in an Agentic framework.
+This application demonstrates a **State-of-the-Art Retrieval-Augmented Generation (RAG)** system wrapped in an Agentic framework.
 Unlike linear RAG pipelines, this agent **autonomously decides** when to query the knowledge base based on user intent.
 
 **Key Capabilities:**
-*   **🧠 Agentic Decision Making:** The system uses a **ReAct** loop. It doesn't just retrieve; it *thinks* first. If you say "Hi", it replies instantly. If you ask "What's in the contract?", it calls the retrieval tool.
-*   **🔍 Session-Scoped Vector Store:** Uses **ChromaDB** to create isolated, ephemeral embeddings for each user session.
+*   **🧠 Agentic Decision Making:** Uses **LangGraph** ReAct loop to autonomously decide when to query the knowledge base.
+*   **🔍 Hybrid Search:** Combines **Vector Search** (Semantics) + **BM25** (Exact Keyword Matching) using `EnsembleRetriever`.
+*   **📊 Re-Ranking:** Uses **FlashRank** to re-score the top 40 results and extract the top 5 most relevant "Needles in the Haystack".
 *   **📏 Granular Observability:** Tracks cost separately for the *Agent's Reasoning* vs. the *Retrieval Process*, allowing for precise ROI calculation of RAG operations.
 *   **💰 Token Economy:** By deciding *not* to retrieve data for general chit-chat, the agent saves significant token costs compared to naive RAG pipelines.
 """
@@ -621,7 +670,7 @@ if user_query:
 # ------------------------------
 with st.sidebar:
     st.header("⚙️ System Architecture", divider="rainbow")
-    st.info("This PoC demonstrates **Agentic RAG** with **Session-Scoped Vector Storage**.")
+    st.info("This PoC demonstrates **Agentic SOTA RAG** (Hybrid Search + FlashRank Reranker) with **Session-Scoped Vector Storage**.")
 
     # ------------------------------
     # Info Section
@@ -633,9 +682,11 @@ with st.sidebar:
         - `LangChain`: Ingestion pipelines.
         
         **Data & Retrieval:**
-        - ***Ingestion:*** `PyPDFLoader` + `RecursiveCharacterTextSplitter`.
+        - ***Hybrid Search:*** `EnsembleRetriever` (Chroma Vector + BM25 Keyword).
+        - ***Reranking:*** `FlashRank` (Cross-Encoder optimization).
+        - ***Ingestion:*** `PyPDFLoader` + `RecursiveCharacterTextSplitter` (800 chars).
         - ***Vector Store:*** `ChromaDB` (Ephemeral/In-Memory) for session isolation.
-        - ***Embedding Model:*** Google Gemini `text-embedding-004`.
+        - ***Embedding Model:*** Google Gemini `embedding-001`.
         
         **Observability & FinOps:**
         - ***Granular Cost Attribution:*** Distinguishes between *Reasoning Cost* (The Agent) and *Retrieval Context Cost* (The RAG Chain) for precise ROI calculation..
@@ -680,24 +731,8 @@ with st.sidebar:
     # Upload PDF Section 
     # ------------------------------
     st.markdown("### 📂 Knowledge Base")
-    
-    # 1. INSPECT DB (DEBUGGER) - Useful for understanding what is really happening
-    if st.toggle("Show DB Stats (Debug)"):
-        try:
-            client_debug = get_chroma_client()
-            try:
-                col_debug = client_debug.get_collection(collection_name)
-                cnt = col_debug.count()
-                st.caption(f"📚 Documents in DB: **{cnt}**")
-                st.caption(f"🗃️ Collection Name: `{collection_name}`")
-            except Exception:
-                st.caption("Testing: No collection found yet.")
-        except Exception as e:
-            st.error(f"Debug Error: {e}")
 
     # 2. UPLOADER WITH DYNAMIC KEY
-    # We use a local variable 'uploaded_files' instead of writing directly to session_state.uploaders
-    # The key=... trick allows us to reset it.
     uploaded_files = st.file_uploader(
         "Upload & click the *Process* button", 
         type=["pdf", "txt"], 
@@ -760,7 +795,7 @@ with st.sidebar:
              except Exception:
                 pass
 
-    # 6. CLEAR DATABASE BUTTON (Redone)
+    # 6. CLEAR DATABASE BUTTON 
     # Show the button ONLY if the DB has content (flag) or if the example is loaded.
     # Independent of the uploader.
     if st.session_state.db_has_content or st.session_state.get("example_loaded"):
@@ -772,7 +807,12 @@ with st.sidebar:
                 st.toast("Database cleared!", icon="🗑️")
             except Exception:
                 st.warning("Collection was already empty.")
-            
+        
+            # --- CLEAR GLOBAL STORE ---
+            bm25_store = get_bm25_store()
+            if st.session_state.session_id in bm25_store:
+                del bm25_store[st.session_state.session_id]
+
             # Reset all states
             st.session_state.db_has_content = False
             st.session_state["example_loaded"] = False
