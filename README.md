@@ -144,14 +144,8 @@ To validate the **Hybrid Search** capabilities, load the provided `example_docs/
 
 ---
 
-## 📄 License
-
-This project is licensed under the MIT License.
-
----
-
 <div align="center">
   <b>Developed by Daniele Celsa</b><br>
   <a href="https://danielecelsa.github.io/portfolio/">View Portfolio</a> • 
-  <a href="https://www.linkedin.com/in/daniele-celsa/">LinkedIn</a>
+  <a href="https://www.linkedin.com/in/domenico-daniele-celsa-518b758b/">LinkedIn</a>
 </div>
