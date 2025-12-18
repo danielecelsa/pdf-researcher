@@ -11,17 +11,24 @@ A production-grade **Agentic RAG System** designed for granular document analysi
 
 ## 🚀 Key Features
 
-1.   **Agentic Reasoning (ReAct Loop):** The system does not blindly retrieve data for every query. Using **LangGraph**, the agent evaluates the user intent:
-    *   **General Chit-Chat:** Answered directly (Zero Retrieval Cost).
-    *   **Document Queries:** Triggers the research tool only when necessary.
-2.   **SOTA Retrieval Pipeline:** Implements a sophisticated "*Retrieve & Rerank*" architecture to overcome the limitations of standard vector search:
-    *   **Hybrid Search:** Combines **ChromaDB** (Semantic/Dense Vector Search) with **BM25** (Keyword/Sparse Search) via EnsembleRetriever. This ensures retrieval of both conceptual matches and specific alphanumeric codes/acronyms.
-    *   **Reranking:** Applies **FlashRank** (Cross-Encoder) to the top 10 candidates to semantically re-score and extract the "Top 5" most relevant chunks, dramatically improving accuracy.
-3.   **FinOps & Observability:** Engineered for transparency in cost and performance:
-    *   **Granular Token Tracking:** Distinguishes between Reasoning Cost (Agent thought process) and Retrieval Context Cost (RAG overhead).
-    *   **Live Metrics:** Real-time tracking of Latency, Input/Output Tokens, and USD Cost per interaction.
-    *   **Structured Logging:** Integration with Redis and BetterStack for remote monitoring.
-4.   **Enterprise-Grade Privacy:** Session-Scoped Storage: Uses ephemeral, in-memory vector stores isolated by `session_id`. Data is strictly segregated between users and wiped upon session termination.
+### 1. Agentic Reasoning (ReAct Loop) 
+The system does not blindly retrieve data for every query. Using **LangGraph**, the agent evaluates the user intent:
+*   **General Chit-Chat:** Answered directly (Zero Retrieval Cost).
+*   **Document Queries:** Triggers the research tool only when necessary.
+
+### 2. SOTA Retrieval Pipeline 
+Implements a sophisticated "*Retrieve & Rerank*" architecture to overcome the limitations of standard vector search:
+*   **Hybrid Search:** Combines **ChromaDB** (Semantic/Dense Vector Search) with **BM25** (Keyword/Sparse Search) via EnsembleRetriever. This ensures retrieval of both conceptual matches and specific alphanumeric codes/acronyms.
+*   **Reranking:** Applies **FlashRank** (Cross-Encoder) to the top 10 candidates to semantically re-score and extract the "Top 5" most relevant chunks, dramatically improving accuracy.
+
+### 3. FinOps & Observability 
+Engineered for transparency in cost and performance:
+*   **Granular Token Tracking:** Distinguishes between Reasoning Cost (Agent thought process) and Retrieval Context Cost (RAG overhead).
+*   **Live Metrics:** Real-time tracking of Latency, Input/Output Tokens, and USD Cost per interaction.
+*   **Structured Logging:** Integration with Redis and BetterStack for remote monitoring.
+
+### 4. Enterprise-Grade Privacy
+Session-Scoped Storage: Uses ephemeral, in-memory vector stores isolated by `session_id`. Data is strictly segregated between users and wiped upon session termination.
 
 ---
 
@@ -135,14 +142,13 @@ To validate the **Hybrid Search** capabilities, load the provided `example_docs/
     > *"How many parameters does the model 'Cohere xlarge v20220609' have?"*
     *   *Result:* The system identifies the exact alphanumeric code `v20220609` which pure vector search treats as noise.
 
-
 ---
 
-## 👨‍💻 Author
-Daniele Celsa
+## 📄 License
 
-*   [Portfolio Website](https://danielecelsa.github.io/portfolio/)
-*   [LinkedIn](https://www.linkedin.com/in/domenico-daniele-celsa-518b758b/)
+This project is licensed under the MIT License.
+
+---
 
 <div align="center">
   <b>Developed by Daniele Celsa</b><br>
