@@ -92,7 +92,25 @@ A custom `TokenUsageCallbackHandler` intercepts the LLM streams to separate the 
 
 ---
 
-## 🧪 Intallation & Usage
+## 🧪 Test Scenarios
+
+To validate the **Hybrid Search** capabilities, load the provided `example_docs/llm_introduction.pdf` and try these queries:
+
+1.  **The "Semantic" Test (Vector Search):**
+    > *"Summarize the concept of Transformers."*
+    *   *Result:* The embedding model successfully retrieves conceptual definitions.
+
+2.  **The "Needle in a Haystack" Test (BM25 + Rerank):**
+    > *"What is the 'laryngeal descent theory' mentioned in the preface?"*
+    *   *Result:* Vector search often misses this minor detail. BM25 catches the specific keyword, and FlashRank promotes it to the top.
+
+3.  **The "Specific Data" Test:**
+    > *"How many parameters does the model 'Cohere xlarge v20220609' have?"*
+    *   *Result:* The system identifies the exact alphanumeric code `v20220609` which pure vector search treats as noise.
+
+---
+
+## 📦 Installation & Setup
 
 ### Prerequisites
 *   Python 3.10+
@@ -123,24 +141,6 @@ REDIS_URL=your_redis_url
 ```bash
 streamlit run app.py
 ```
-
----
-
-## 🧪 Test Scenarios
-
-To validate the **Hybrid Search** capabilities, load the provided `example_docs/llm_introduction.pdf` and try these queries:
-
-1.  **The "Semantic" Test (Vector Search):**
-    > *"Summarize the concept of Transformers."*
-    *   *Result:* The embedding model successfully retrieves conceptual definitions.
-
-2.  **The "Needle in a Haystack" Test (BM25 + Rerank):**
-    > *"What is the 'laryngeal descent theory' mentioned in the preface?"*
-    *   *Result:* Vector search often misses this minor detail. BM25 catches the specific keyword, and FlashRank promotes it to the top.
-
-3.  **The "Specific Data" Test:**
-    > *"How many parameters does the model 'Cohere xlarge v20220609' have?"*
-    *   *Result:* The system identifies the exact alphanumeric code `v20220609` which pure vector search treats as noise.
 
 ---
 
