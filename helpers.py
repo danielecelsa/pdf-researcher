@@ -4,11 +4,9 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult 
 import logging
-from streamlit.runtime import get_instance
-from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 # --- Core Event Parser ---
-def process_agent_events(events: List[Dict]) -> Tuple[Optional[AIMessage], List[Dict], List[Dict], Dict]:
+def process_agent_events(events: List[Dict]) -> Tuple[Optional[AIMessage], List[Dict], Dict]:
     """
     Parses the event stream from create_react_agent to extract a trace,
     the final answer, and ACCURATE token usage for the last interaction.
@@ -60,6 +58,11 @@ def get_user_info(logger: logging.Logger) -> dict:
     """
     user_info = {"ip": "Unknown", "user_agent": "Unknown"}
     try:
+        # Lazy import so `import helpers` does not require Streamlit
+        # (the eval runner / tests import this module without a Streamlit runtime).
+        from streamlit.runtime import get_instance
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
         # Get the context for the current script run
         ctx = get_script_run_ctx()
         if ctx is None:

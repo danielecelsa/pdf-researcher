@@ -5,8 +5,6 @@
 # Imports
 # ------------------------------
 import os, io, time
-import asyncio
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 import uuid
@@ -19,30 +17,22 @@ import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
-# LangGraph / LangChain Core
-from langgraph.prebuilt import create_react_agent
-from langchain_core.tools import StructuredTool
 from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, SystemMessagePromptTemplate, HumanMessagePromptTemplate, PromptTemplate
-from langchain_community.document_loaders import PyPDFLoader 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.retrievers import BM25Retriever
-from langchain.retrievers import EnsembleRetriever, ContextualCompressionRetriever
-from langchain.retrievers.document_compressors import FlashrankRerank
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains import create_retrieval_chain
-from langchain_core.documents import Document
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-from langchain_core.callbacks import Callbacks
-
-
-# Vector DB: Chroma integration
-import chromadb
-from langchain_chroma import Chroma
-from chromadb.utils.embedding_functions.chroma_langchain_embedding_function import create_langchain_embedding
 
 from logging_config import (
     get_logger,
+)
+
+# Core agentic RAG logic (Streamlit-free): agent build, hybrid retrieval, ingestion.
+# The @st.cache_resource singletons (Chroma client, BM25 store, LLM, prompt,
+# checkpointer) now live in agent_core as process-level singletons.
+from agent_core import (
+    MODEL,
+    SAMPLE_PDF_PATH,
+    get_chroma_client,
+    get_bm25_store,
+    build_agent,
+    ingest_documents,
 )
 
 # Helpers
@@ -55,8 +45,6 @@ from helpers import (
 
 from async_bg import collect_events_from_agent
 
-from prompts import RAG_AGENT_SYSTEM_PROMPT, RAG_RETRIEVAL_PROMPT
-
 # Load environment variables from .env file if not in a rendering environment
 if os.getenv("RENDER") != "true":
     load_dotenv()
@@ -65,16 +53,13 @@ if os.getenv("RENDER") != "true":
 # ------------------------------
 # Configuration
 # ------------------------------
-MODEL = os.environ.get("GENAI_MODEL", "gemini-2.5-flash")
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY_2")
-
+# MODEL / GOOGLE_API_KEY / SAMPLE_PDF_PATH are defined in agent_core (single source);
+# MODEL and SAMPLE_PDF_PATH are imported above. Only UI/cost config lives here.
 LOG_DIR = Path(os.environ.get("CHAT_LOG_DIR", "./logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 COST_PER_1K_INPUT = float(os.getenv("COST_PER_1K_TOKENS_USD_INPUT", "0.0002"))
 COST_PER_1K_OUTPUT = float(os.getenv("COST_PER_1K_TOKENS_USD_OUTPUT", "0.0002"))
-
-SAMPLE_PDF_PATH = "example_docs/llm_introduction.pdf"
 
 # ------------------------------
 # LOGGING SETUP
@@ -181,23 +166,14 @@ def update_token_usage(usage_last: dict, token_callback: TokenUsageCallbackHandl
 # ------------------------------
 # Helpers
 # ------------------------------
-@st.cache_resource
-def get_chroma_client(): # default: in-process, no persistence
-    """Get or create a Chroma client instance."""
-    client = chromadb.Client()
-    logger_local.info("Collections_lru: %s", client.list_collections())
-    return client
+# get_chroma_client() and get_bm25_store() (process-level singletons) now live in
+# agent_core and are imported above, so ingestion and the research tool share the
+# same in-memory Chroma client + BM25 store even across the background thread.
 
 def reset_uploader():
     """Increment key to force Streamlit to recreate the file uploader widget empty."""
     st.session_state.uploader_key += 1
     st.rerun()
-
-# --- THREAD-SAFE GLOBAL STORE FOR BM25 ---
-@st.cache_resource
-def get_bm25_store():
-    # This dictionary lives in the global memory of the server
-    return {} # Structure: { session_id: [List of Documents] }
 
 # ------------------------------
 # Example PDF helper
@@ -275,179 +251,11 @@ def show_pdf_preview_with_fallback(file_like):
         st.warning("Could not create download link for PDF.")
 
 # ------------------------------
-# TOOL: research (uses Chroma)
+# Agent (built in agent_core)
 # ------------------------------
-# Useful to have many sessions with isolated collections. We are not using persistence here, but you could.
-def research_factory(collection_name: str, session_id: str):
-    """Factory to create a research tool bound to a specific Chroma collection/session of the user."""
-    def research(query: str, callbacks: Callbacks = None) -> str:
-        """
-        Use this tool to retrieve and summarize information from the documents (PDFs or TXTs) uploaded by the user, and answer the user's question.
-        
-        Use this tool whenever the user's question involves the uploaded documents,
-        even if the question is only partially related to their content.
-        Do not use this tool for general knowledge questions unrelated to the uploaded documents.
-
-        Uses Hybrid Search (Vector + Keyword) and Reranking for high accuracy.
-
-        Args:
-            query (str): The user question to be answered using only the uploaded documents.
-
-        Returns:
-            str: A concise, evidence-based answer derived exclusively from the uploaded documents.
-        """
-        logger_all.info("TOOL CALLED with: %s", query)
-
-        # ensure embeddings client event loop exists (Google GenAI uses async clients)
-        try:
-            # ensure_event_loop if you have such helper; otherwise minimally:
-            asyncio.get_event_loop()
-        except Exception:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        # 1. SETUP EMBEDDINGS (With explicit Key)
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=GOOGLE_API_KEY)
-    
-        # 2. SETUP VECTOR RETRIEVER (Chroma)n
-        client = get_chroma_client()  # in-process ephemeral
-        logger_all.info("Collections_tool: %s ", collection_name)
-        logger_local.info("Collections_tool_list: %s", client.list_collections())
-        vect = Chroma(collection_name=collection_name, embedding_function=embeddings, client=client)
-
-        # Define Base Retriever (Chroma) with k=10 for wide recall
-        chroma_retriever = vect.as_retriever(search_kwargs={"k": 5})
-
-        # 3. SETUP HYBRID SEARCH (Ensemble with BM25)
-        # --- FIX: Use Global Store and the session_id "captured" by the closure ---
-        bm25_store = get_bm25_store()
-        current_docs = bm25_store.get(session_id, []) # Read from the global dictionary
-
-        if current_docs:
-            logger_local.info("Building BM25 Index from %d chunks (Global Store)...", len(current_docs))
-            bm25_retriever = BM25Retriever.from_documents(current_docs)
-            bm25_retriever.k = 5
-            
-            ensemble_retriever = EnsembleRetriever(
-                retrievers=[bm25_retriever, chroma_retriever], 
-                weights=[0.5, 0.5]
-            )
-            base_retriever = ensemble_retriever
-            logger_local.info("✅ Hybrid Search Activated (BM25 + Chroma)")
-        else:
-            # If no docs for BM25, fallback to pure vector search
-            base_retriever = chroma_retriever
-            logger_local.warning(f"⚠️ BM25 docs missing for session {session_id}. Using pure Vector Search.")
-
-        # 4. SETUP RERANKER (FlashRank)
-        # Compresses 10 candidates down to Top 5
-        compressor = FlashrankRerank(
-            model="ms-marco-MiniLM-L-12-v2",
-            top_n=5)
-        compression_retriever = ContextualCompressionRetriever(
-            base_compressor=compressor, 
-            base_retriever=base_retriever
-        )
-
-        rag_prompt = PromptTemplate.from_template(RAG_RETRIEVAL_PROMPT)
-
-        # 6. LLM (Explicit Key)
-        llm = ChatGoogleGenerativeAI(model=MODEL, google_api_key=GOOGLE_API_KEY, temperature=0.2, transport="rest")
-
-        doc_chain = create_stuff_documents_chain(llm, rag_prompt)
-        rag_chain = create_retrieval_chain(compression_retriever, doc_chain)
-        
-        try:
-            # Execute Chain
-            resp = rag_chain.invoke(
-                {"input": query}, 
-                config={"callbacks": callbacks}
-            )
-            # Log the final reranked context
-            if "context" in resp:
-                logger_local.info("--- FINAL RERANKED CONTEXT ---")
-                for i, doc in enumerate(resp["context"]):
-                    logger_local.info(f"RERANKED #{i+1}: {doc.page_content[:60]}...")
-            
-            # Normalize response
-            if isinstance(resp, dict):
-                result = resp.get("answer") or resp.get("text") or str(resp)
-                logger_local.info("Tool's answer: %s", result)
-                return result
-            logger_local.info("Tool's answer (fallback): %s", result)
-            return str(resp)
-        
-        except Exception as e:
-            logger_all.exception("RAG chain invocation failed: %s", e)
-            return "I could not run the retrieval chain due to an internal error."
-    
-    return research
-
-
-# ------------------------------
-# Build agent
-# ------------------------------
-@st.cache_resource
-def get_prompt():
-    system = SystemMessagePromptTemplate.from_template(RAG_AGENT_SYSTEM_PROMPT)
-
-    hist = MessagesPlaceholder(variable_name="messages")
-    prompt = ChatPromptTemplate.from_messages([system, hist])
-    return prompt
-
-@st.cache_resource
-def get_llm():
-    try:
-        llm = ChatGoogleGenerativeAI(
-            model=MODEL,
-            google_api_key=GOOGLE_API_KEY,
-            temperature=0.2,
-            safety_settings=None,
-            transport="rest"
-        )
-    except Exception as e:
-        logger_all.exception("Could not initialize LLM: %s", e)
-        llm = None
-    return llm    
-
-@st.cache_resource
-def get_checkpointer():
-    try:
-        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver as SqliteCheckpointer
-        checkpointer = SqliteCheckpointer.from_conn_string(os.environ.get("CHECKPOINT_DB", "./langgraph_state.sqlite"))
-    except Exception:
-        try:
-            from langgraph.checkpoint.memory import InMemorySaver as InMemoryCheckpointer
-            checkpointer = InMemoryCheckpointer()
-        except Exception:
-            checkpointer = None
-    return checkpointer
-
-def build_agent(collection_name, session_id):
-
-    research_tool_function = research_factory(collection_name, session_id)
-
-    tools = [
-        StructuredTool.from_function(
-            research_tool_function,
-            name="research",
-            description=(
-                "Use this tool to answer questions that require information from the uploaded PDF/text documents. "
-                "Always call this tool when the user's question refers to facts, dates, quotes, or content contained in the uploaded files."
-                "The tool accepts a single string question and returns a concise, evidence-based answer."
-            ),
-        )
-    ]
-    
-    agent = create_react_agent(
-        model=get_llm(),
-        tools=tools,
-        prompt=get_prompt(),
-        checkpointer=get_checkpointer(),
-    )
-
-    return agent
-
+# research_factory / build_agent and the get_prompt / get_llm / get_checkpointer
+# singletons now live in agent_core. The shell just builds the agent once per
+# Streamlit session and stashes it in session_state.
 if 'agent_for_session' not in st.session_state:
     st.session_state['agent_for_session'] = build_agent(
         st.session_state['collection_name'],
@@ -456,102 +264,48 @@ if 'agent_for_session' not in st.session_state:
 
 
 # ------------------------------
-# Update vector DB using Chroma
+# Update vector DB (Streamlit wrapper around agent_core.ingest_documents)
 # ------------------------------
 def update_vector_db(uploaded_files):
-    """Update the vector database (Chroma) AND Session State (BM25) with newly uploaded documents"""
+    """Streamlit wrapper: runs the pure ingestion in agent_core and surfaces
+    progress / per-file errors / success in the UI. Behaviour matches the previous
+    monolithic version."""
     if not uploaded_files:
         return False
 
-    # ensure event loop for embeddings init
-    try:
-        asyncio.get_event_loop()
-    except Exception:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    # Lazily create the progress bar on the first callback, so it only appears
+    # during the Chroma write phase (as in the original monolith).
+    _bar = {"obj": None}
 
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=GOOGLE_API_KEY)
+    def _progress(fraction):
+        if _bar["obj"] is None:
+            _bar["obj"] = st.progress(0)
+        _bar["obj"].progress(fraction)
 
-    raw_docs = []
-    
-    # Iterate on files passed as argument
-    for f in uploaded_files:
-        try:
-            # write temp file and load via PyPDFLoader
-            if f.name.lower().endswith(".pdf"):
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                    tmp.write(f.read())
-                    tmp_path = tmp.name
+    def _on_file_error(filename, exc, kind="load"):
+        if kind == "generic":
+            st.error(f"Generic error processing {filename}: {exc}")
+        else:
+            st.error(f"❌ Error with file '{filename}': The file might be corrupted or invalid. Details: {exc}")
 
-                try:
-                    loader = PyPDFLoader(tmp_path)
-                    docs = loader.load()
-                    # attach source metadata
-                    for d in docs:
-                        d.metadata = d.metadata or {}
-                        d.metadata["source"] = f.name
-                    raw_docs.extend(docs)
-                except Exception as e:
-                    # PDF Corrupted: Log the error but do not interrupt everything
-                    st.error(f"❌ Error with file '{f.name}': The file might be corrupted or invalid. Details: {e}")
-                    # We do not do a silent 'continue', but the user will see the error.
-                    continue 
-                finally:
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
+    result = ingest_documents(
+        uploaded_files,
+        collection_name,
+        st.session_state.session_id,
+        progress_cb=_progress,
+        on_file_error=_on_file_error,
+    )
 
-            elif f.name.lower().endswith(".txt"):
-                content = f.read().decode("utf-8") if hasattr(f, "read") else f
-                raw_docs.append(Document(page_content=content, metadata={"source": f.name}))
-        
-        except Exception as e:
-            st.error(f"Generic error processing {f.name}: {e}")
-    
-    if not raw_docs:
-        # If we are here, either there were no files, or they were all corrupted
+    # Clean up progress bar (only exists if ingestion reached the write phase)
+    if _bar["obj"] is not None:
+        _bar["obj"].empty()
+
+    if not result:
         st.warning("No valid documents extracted. Vector DB was not updated.")
         return False
 
-    # Split and Load into Chroma
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
-    final_docs = text_splitter.split_documents(raw_docs)
-
-    # Save docs for BM25
-    session_id = st.session_state.session_id
-    bm25_store = get_bm25_store()
-
-    if session_id not in bm25_store:
-        bm25_store[session_id] = []
-
-    bm25_store[session_id].extend(final_docs)
-
-    # STORE FOR VECTORS (Chroma)
-    chroma_client = get_chroma_client()
-    emb_chroma = create_langchain_embedding(embeddings)
-    coll = chroma_client.get_or_create_collection(name=collection_name, embedding_function=emb_chroma)
-
-    # Batch processing to avoid rate limits (even with tier 1, good practice)
-    batch_size = 20 # Bigger because of Tier 1
-    total_docs = len(final_docs)
-
-    # Optional progress bar
-    progress_bar= st.progress(0)
-    
-    for i in range(0, total_docs, batch_size):
-        batch = final_docs[i : i + batch_size]
-        ids = [f"{collection_name}::{uuid.uuid4()}" for _ in batch]
-        coll.add(ids=ids, documents=[d.page_content for d in batch], metadatas=[d.metadata for d in batch])
-        # Update progress
-        progress_bar.progress(min((i + batch_size) / total_docs, 1.0))
-        time.sleep(0.3)
-    
-    # Clean up progress bar
-    progress_bar.empty()
-
-    files_count = len(uploaded_files)
-    logger_all.info("Updated Chroma & BM25 List with %d files, %d chunks.", files_count, len(final_docs))
-
-    st.success(f"✅ Processed {files_count} files. DB updated with {len(final_docs)} chunks (Hybrid Search Ready).")
+    files_count, chunks = result
+    st.success(f"✅ Processed {files_count} files. DB updated with {chunks} chunks (Hybrid Search Ready).")
     return True
 
 
