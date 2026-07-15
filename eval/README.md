@@ -15,6 +15,10 @@ tracked, comparable evaluation runs.
 - `push_to_langsmith.py` — push `golden.jsonl` to a LangSmith Dataset
   (`pdf-researcher-golden`), idempotent.
 - `fetch_corpus.py` — (re)build `corpus/` (the arXiv PDFs are not committed).
+- `run_eval.py` — the evaluation **runner**: drives the RAG over the golden set and computes
+  both axes — retrieval (deterministic `recall@k` / `precision@k`) and generation (RAGAS
+  `faithfulness` / `answer_relevancy` / `answer_correctness`) — via `langsmith.evaluate()`,
+  recording each run as a comparable LangSmith Experiment.
 
 ## Corpus
 `corpus/` holds the documents the golden set is derived from:
@@ -38,9 +42,14 @@ python eval/fetch_corpus.py          # rebuild corpus/
 python eval/generate_golden.py 20    # -> golden_raw.jsonl   (RAGAS; consumes API credits)
 python eval/curate_golden.py         # -> golden.jsonl
 python eval/push_to_langsmith.py     # -> LangSmith Dataset 'pdf-researcher-golden'
+python eval/run_eval.py --limit 3    # dry-run on N cases (validate wiring; cheap)
+python eval/run_eval.py              # full evaluation (all cases) -> LangSmith Experiment
 ```
 
 The evaluation **metrics** — retrieval `recall@k` / `precision@k` (deterministic, chunk vs
-`reference_contexts` overlap) and generation `faithfulness` / `answer_relevance` /
-`answer_correctness` (RAGAS LLM-judge) — are produced by the evaluation **runner**, which
-drives the RAG over this golden set and records each run as a LangSmith Experiment.
+`reference_contexts` overlap) and generation `faithfulness` / `answer_relevancy` /
+`answer_correctness` (RAGAS LLM-judge) — are produced by the evaluation **runner**
+(`run_eval.py`), which drives the RAG over this golden set and records each run as a LangSmith
+Experiment. The retrieval axis is deterministic (embeddings only, no LLM judge); the generation
+axis uses `gemini-2.5-flash` as judge (same model as the system — a deliberate, stated
+self-judging trade-off for this exercise).
