@@ -22,3 +22,23 @@ dependencies = [
     "streamlit>=1.49.1",
     "valkey>=6.1.1",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["old_files", "bkp", "inspect_db", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# run_eval / generate_golden set os.environ + sys.path before importing (intentional).
+"eval/run_eval.py" = ["E402"]
+"eval/gate.py" = ["E402"]
+"eval/generate_golden.py" = ["E402"]
+"eval/push_to_langsmith.py" = ["E402"]
+"scripts/smoke_trace.py" = ["E402"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "eval"]
+testpaths = ["tests"]

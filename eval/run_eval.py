@@ -33,13 +33,13 @@ Usage:
   .venv/bin/python eval/run_eval.py --limit 3   # dry-run on N cases (cheap; validate wiring/cost)
   .venv/bin/python eval/run_eval.py             # full run (all 17 cases) [spends API]
 """
-import os
-import sys
-import glob
 import argparse
 import asyncio
+import glob
+import os
+import sys
+from collections import defaultdict
 from pathlib import Path
-from collections import defaultdict, Counter
 
 # Route eval traces/experiments to a SEPARATE LangSmith project (keep the app's project clean).
 # Must be set before anything triggers load_dotenv (python-dotenv does not override existing
@@ -52,24 +52,23 @@ sys.path.insert(0, str(REPO_ROOT))
 os.chdir(REPO_ROOT)
 
 import nest_asyncio
+
 nest_asyncio.apply()
 
-from rapidfuzz import fuzz
-from langsmith import Client, evaluate
-
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-
-from ragas.llms import LangchainLLMWrapper
-from ragas.embeddings import LangchainEmbeddingsWrapper
-from ragas.metrics import Faithfulness, ResponseRelevancy, AnswerCorrectness
+from langsmith import Client, evaluate
 from ragas.dataset_schema import SingleTurnSample
+from ragas.embeddings import LangchainEmbeddingsWrapper
+from ragas.llms import LangchainLLMWrapper
+from ragas.metrics import AnswerCorrectness, Faithfulness, ResponseRelevancy
 from ragas.run_config import RunConfig
+from retrieval_metrics import precision_at_k, recall_at_k
 
 from agent_core import (
-    MODEL,
     GOOGLE_API_KEY,
-    build_retrievers,
+    MODEL,
     answer_from_retriever,
+    build_retrievers,
     ingest_documents,
 )
 from helpers import TokenUsageCallbackHandler, compute_cost
@@ -138,17 +137,8 @@ def target(inputs: dict) -> dict:
 
 
 # ------------------------------
-# Retrieval evaluators (deterministic overlap)
+# Retrieval evaluators (deterministic overlap; metrics live in retrieval_metrics.py)
 # ------------------------------
-def _norm(s: str) -> str:
-    return " ".join((s or "").lower().split())
-
-
-def _covers(chunk: str, ref_ctx: str) -> bool:
-    """A chunk 'covers' a reference_context if the (shorter) chunk is ~contained in it."""
-    return fuzz.partial_ratio(_norm(chunk), _norm(ref_ctx)) >= OVERLAP_THRESHOLD
-
-
 def _record(example, key, score):
     eid = str(example.id)
     SCORES[eid][key] = score
@@ -159,31 +149,23 @@ def _record(example, key, score):
         }
 
 
-def _recall(retrieved, refs):
-    if not refs:
-        return None
-    covered = sum(1 for g in refs if any(_covers(c, g) for c in retrieved))
-    return covered / len(refs)
-
-
 def recall_at_5(run, example):
     refs = (example.outputs or {}).get("reference_contexts", [])
-    score = _recall(run.outputs.get("contexts", []), refs)
+    score = recall_at_k(run.outputs.get("contexts", []), refs, OVERLAP_THRESHOLD)
     _record(example, "recall@5", score)
     return {"key": "recall@5", "score": score}
 
 
 def precision_at_5(run, example):
-    contexts = run.outputs.get("contexts", [])
     refs = (example.outputs or {}).get("reference_contexts", [])
-    score = None if not contexts else sum(1 for c in contexts if any(_covers(c, g) for g in refs)) / len(contexts)
+    score = precision_at_k(run.outputs.get("contexts", []), refs, OVERLAP_THRESHOLD)
     _record(example, "precision@5", score)
     return {"key": "precision@5", "score": score}
 
 
 def recall_at_10_prererank(run, example):
     refs = (example.outputs or {}).get("reference_contexts", [])
-    score = _recall(run.outputs.get("candidates", []), refs)
+    score = recall_at_k(run.outputs.get("candidates", []), refs, OVERLAP_THRESHOLD)
     _record(example, "recall@10_prererank", score)
     return {"key": "recall@10_prererank", "score": score}
 
@@ -285,7 +267,8 @@ def _fmt(v):
 def print_report(experiment_name):
     ids = list(SCORES.keys())
     print("\n" + "=" * 100)
-    print("RAG EVAL — 2 axes  |  overlap threshold =", OVERLAP_THRESHOLD, " | judge = gemini-2.5-flash (self-judging caveat)")
+    print("RAG EVAL — 2 axes  |  overlap threshold =", OVERLAP_THRESHOLD,
+          " | judge = gemini-2.5-flash (self-judging caveat)")
     print("=" * 100)
 
     header = f"{'id':<11}{'synth':<26}" + "".join(f"{k:>19}" for k in ALL_KEYS)

@@ -16,10 +16,10 @@ Notes:
 
 Usage: .venv/bin/python eval/generate_golden.py [testset_size]
 """
-import os
-import sys
 import glob
 import json
+import os
+import sys
 from pathlib import Path
 
 # Route eval traces to a SEPARATE LangSmith project (keep the app's project clean).
@@ -31,20 +31,20 @@ os.environ["LANGSMITH_PROJECT"] = "pdf-researcher-eval"
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import nest_asyncio
+
 nest_asyncio.apply()
 
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_core.tracers.langchain import wait_for_all_tracers
-
-from ragas.testset import TestsetGenerator
-from ragas.llms import LangchainLLMWrapper
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from ragas.embeddings import LangchainEmbeddingsWrapper
-from ragas.testset.synthesizers import default_query_distribution
+from ragas.llms import LangchainLLMWrapper
 from ragas.run_config import RunConfig
+from ragas.testset import TestsetGenerator
+from ragas.testset.synthesizers import default_query_distribution
 
 # Reuse the single source of config (model id, api key, sample path)
-from agent_core import MODEL, GOOGLE_API_KEY, SAMPLE_PDF_PATH
+from agent_core import GOOGLE_API_KEY, MODEL
 from helpers import TokenUsageCallbackHandler, compute_cost
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

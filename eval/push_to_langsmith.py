@@ -8,14 +8,15 @@ Idempotent: if the dataset already exists it is left untouched (re-runs won't du
 
 Usage: .venv/bin/python eval/push_to_langsmith.py
 """
-import os
 import json
+import os
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(REPO_ROOT)
 
 from dotenv import load_dotenv
+
 load_dotenv()  # LANGSMITH_API_KEY + LANGSMITH_ENDPOINT (EU) from .env
 
 from langsmith import Client

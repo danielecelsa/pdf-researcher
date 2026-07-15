@@ -10,42 +10,40 @@
 # tool share the same in-memory Chroma client + BM25 store even when research runs
 # on the background asyncio thread.
 
-import os
 import asyncio
+import os
 import tempfile
 import time
 import uuid
 from functools import lru_cache
 
+# Vector DB: Chroma integration
+import chromadb
+from chromadb.utils.embedding_functions.chroma_langchain_embedding_function import create_langchain_embedding
 from dotenv import load_dotenv
-
-# LangGraph / LangChain Core
-from langgraph.prebuilt import create_react_agent
-from langchain_core.tools import StructuredTool
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.retrievers import ContextualCompressionRetriever, EnsembleRetriever
+from langchain.retrievers.document_compressors import FlashrankRerank
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.retrievers import BM25Retriever
+from langchain_core.callbacks import Callbacks
+from langchain_core.documents import Document
 from langchain_core.prompts import (
     ChatPromptTemplate,
     MessagesPlaceholder,
-    SystemMessagePromptTemplate,
     PromptTemplate,
+    SystemMessagePromptTemplate,
 )
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.retrievers import BM25Retriever
-from langchain.retrievers import EnsembleRetriever, ContextualCompressionRetriever
-from langchain.retrievers.document_compressors import FlashrankRerank
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains import create_retrieval_chain
-from langchain_core.documents import Document
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-from langchain_core.callbacks import Callbacks
+from langchain_core.tools import StructuredTool
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 
-# Vector DB: Chroma integration
-import chromadb
-from langchain_chroma import Chroma
-from chromadb.utils.embedding_functions.chroma_langchain_embedding_function import create_langchain_embedding
+# LangGraph / LangChain Core
+from langgraph.prebuilt import create_react_agent
 
 from logging_config import get_logger
-
 from prompts import RAG_AGENT_SYSTEM_PROMPT, RAG_RETRIEVAL_PROMPT
 
 # Load environment variables from .env file if not in a rendering environment
@@ -224,7 +222,8 @@ def research_factory(collection_name: str, session_id: str):
     """Factory to create a research tool bound to a specific Chroma collection/session of the user."""
     def research(query: str, callbacks: Callbacks = None) -> str:
         """
-        Use this tool to retrieve and summarize information from the documents (PDFs or TXTs) uploaded by the user, and answer the user's question.
+        Use this tool to retrieve and summarize information from the documents (PDFs or TXTs)
+        uploaded by the user, and answer the user's question.
 
         Use this tool whenever the user's question involves the uploaded documents,
         even if the question is only partially related to their content.
@@ -277,7 +276,8 @@ def build_agent(collection_name, session_id):
             name="research",
             description=(
                 "Use this tool to answer questions that require information from the uploaded PDF/text documents. "
-                "Always call this tool when the user's question refers to facts, dates, quotes, or content contained in the uploaded files."
+                "Always call this tool when the user's question refers to facts, dates, quotes, "
+                "or content contained in the uploaded files."
                 "The tool accepts a single string question and returns a concise, evidence-based answer."
             ),
         )

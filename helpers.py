@@ -1,9 +1,10 @@
-import json
-from typing import Any, Dict, List, Tuple, Optional
-from langchain_core.messages import AIMessage, ToolMessage
-from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.outputs import LLMResult 
 import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.outputs import LLMResult
+
 
 # --- Core Event Parser ---
 def process_agent_events(events: List[Dict]) -> Tuple[Optional[AIMessage], List[Dict], Dict]:
@@ -40,8 +41,10 @@ def process_agent_events(events: List[Dict]) -> Tuple[Optional[AIMessage], List[
                 trace.append({
                     "type": "tool_output", "tool": msg.name, "observation": msg.content,
                 })
-    
-    last_interaction_usage["total_tokens"] = last_interaction_usage["input_tokens"] + last_interaction_usage["output_tokens"]
+
+    last_interaction_usage["total_tokens"] = (
+        last_interaction_usage["input_tokens"] + last_interaction_usage["output_tokens"]
+    )
     return final_answer, trace, last_interaction_usage
 
 def compute_cost(input_tokens: int, output_tokens: int, cost_per_1k_input: float, cost_per_1k_output: float) -> float:
@@ -74,14 +77,14 @@ def get_user_info(logger: logging.Logger) -> dict:
 
         # Get the Streamlit runtime instance
         runtime = get_instance()
-        
+
         # From the runtime, get the session manager, and then the specific session info
         session_info = runtime._session_mgr.get_session_info(session_id)
 
         if session_info is None:
             logger.warning("Could not find session info for the current session ID.")
             return user_info
-        
+
         # The request headers are located in the 'client' attribute of the session info
         headers = session_info.client.request.headers
 
@@ -133,7 +136,7 @@ class TokenUsageCallbackHandler(BaseCallbackHandler):
         for metadata in self.usage_metadata_list:
             total_input += metadata.get("input_tokens", 0)
             total_output += metadata.get("output_tokens", 0)
-        
+
         return {
             "input_tokens": total_input,
             "output_tokens": total_output,

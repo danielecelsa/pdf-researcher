@@ -1,0 +1,4 @@
+# Dev / CI-only tools (NOT installed in the app Docker image; the Dockerfile builds from
+# requirements.txt). Used by the CI pipeline (lint + tests) and locally.
+ruff>=0.6.0
+pytest>=8.0.0
