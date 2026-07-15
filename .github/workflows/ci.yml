@@ -1,11 +1,12 @@
 name: CI
 
-# CI runs on branch pushes (fast, cheap checks) and on PRs to main (full gate).
+# On every branch push: lint + tests + retrieval gate + docker/Trivy scan.
+# The (paid) generation gate runs on-demand via workflow_dispatch (dispatchable once this
+# workflow is on the default branch; until then run it locally: eval/gate.py --mode generation).
 on:
   push:
     branches-ignore: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   lint-test:
@@ -51,7 +52,7 @@ jobs:
     name: Eval gate — generation (faithfulness)
     runs-on: ubuntu-latest
     needs: lint-test
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -73,7 +74,6 @@ jobs:
     name: Docker build + Trivy scan
     runs-on: ubuntu-latest
     needs: lint-test
-    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
       - name: Build image
