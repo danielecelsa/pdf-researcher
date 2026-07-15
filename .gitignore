@@ -19,3 +19,7 @@ old_files/
 logs/
 bkp/
 inspect_db/
+# eval corpus (arXiv PDFs — rebuilt via eval/fetch_corpus.py, not redistributed)
+eval/corpus/*.pdf
+# eval raw testset (pre-curation artifact; eval/golden.jsonl is the SSoT)
+eval/golden_raw.jsonl

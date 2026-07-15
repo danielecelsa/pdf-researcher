@@ -1,0 +1,9 @@
+# Eval-only dependencies (workstream B / C1) — NOT installed in the app Docker image.
+# The Dockerfile builds from requirements.txt; this file is for local eval + CI only.
+#
+# ragas is pinned to the 0.2.x line ON PURPOSE: ragas >= 0.3 requires langchain 1.x,
+# which would break the app's pinned langchain 0.3.x stack (create_react_agent).
+# ragas 0.2.15 coexists with langchain-core 0.3.x in the same venv.
+ragas==0.2.15
+datasets>=4.0.0
+rapidfuzz>=3.0.0   # required by ragas default KG transforms (OverlapScoreBuilder)
