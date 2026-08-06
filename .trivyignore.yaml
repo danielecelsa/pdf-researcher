@@ -61,6 +61,26 @@ vulnerabilities:
       TracingMiddleware. Same fix and same deferral as CVE-2026-45134.
     expired_at: 2026-11-01
 
+  - id: GHSA-6v7p-g79w-8964
+    statement: >-
+      msgpack 1.1.2 — out-of-bounds read when an Unpacker is reused after an error.
+      This is NOT the msgpack pinned in requirements.txt (that one is 1.2.1 and clean); the
+      finding is the copy vendored inside pip itself, at pip/_vendor/msgpack, used for pip's
+      own HTTP cache. Not fixable by a pin: pip 26.2.1, the current release, still declares
+      `msgpack==1.1.2` in pip/_vendor/vendor.txt. It only runs at build time — the Streamlit
+      app never invokes pip. The real fix is a multi-stage build that keeps pip out of the
+      runtime image, tracked as a separate change because it alters how the live demo builds.
+    expired_at: 2026-11-01
+
+  - id: CVE-2025-47273
+    statement: >-
+      setuptools 70.3.0 — path traversal in PackageIndex.
+      Same situation as the msgpack entry above: the installed setuptools is 83.0.0 and clean,
+      while this finding is pip's vendored pkg_resources, which pip 26.2.1 still declares as
+      `setuptools==70.3.0` in pip/_vendor/vendor.txt. Build-time only, not reachable from the
+      running app, and resolved by the same multi-stage build change.
+    expired_at: 2026-11-01
+
   - id: CVE-2026-25087
     statement: >-
       pyarrow 21.0.0 — denial of service via use-after-free in Arrow C++.
