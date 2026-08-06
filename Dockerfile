@@ -12,6 +12,10 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# Refresh the build toolchain shipped with the base image: the bundled setuptools
+# vendors outdated copies of jaraco.context and wheel that show up in image scans.
+RUN pip install --no-cache-dir --upgrade pip setuptools
+
 # Copy and install requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

@@ -1,0 +1,73 @@
+# Trivy suppression policy — accepted risks, each with a rationale and an expiry date.
+#
+# Everything Trivy reports that has a reachable fix is fixed by bumping the pin in
+# requirements.txt. What is listed here could not be fixed without breaking the app, and
+# was accepted only after checking that the vulnerable code path is not reachable in this
+# project. `expired_at` is enforced by Trivy: once the date passes the finding fails the
+# pipeline again, so an accepted risk cannot quietly become permanent.
+#
+# Reachability was verified by grepping the tracked sources; the grep commands are quoted
+# in each statement so the claim can be re-checked instead of trusted.
+
+vulnerabilities:
+  # ---------------------------------------------------------------------------------
+  # Blocked by a hard version constraint: the fix is a major release that breaks the app.
+  # Both expire together with the planned evaluation of a LangChain 1.x migration.
+  # ---------------------------------------------------------------------------------
+
+  - id: CVE-2026-34070
+    statement: >-
+      langchain-core 0.3.86 — path traversal in the legacy load_prompt helpers.
+      Not reachable: this project never calls load_prompt, langchain.hub or any prompt
+      loader on external input (`git ls-files '*.py' | xargs grep -n 'load_prompt'` returns
+      nothing); all prompts are Python literals in prompts.py. The fix ships in
+      langchain-core 1.2.22, and 0.3.86 is the final release of the 0.3.x line, so no
+      backport exists. Upgrading to 1.x breaks create_react_agent on langgraph 0.6.x, which
+      is the agent this app is built on. Revisit together with the LangChain 1.x migration.
+    expired_at: 2027-02-01
+
+  - id: CVE-2025-64439
+    statement: >-
+      langgraph-checkpoint 2.1.2 — remote code execution in the "json" serde mode.
+      Not reachable: the app runs InMemorySaver with the default serializer and never
+      deserializes checkpoint state from an untrusted source; conversation state is produced
+      by the app itself, in-process, and never persisted or transported. The fix ships in
+      langgraph-checkpoint 3.0.0, which langgraph 0.6.7 forbids (it pins
+      langgraph-checkpoint<3.0.0), so this cannot be fixed without moving to langgraph 1.x.
+      Revisit together with the LangChain 1.x migration.
+    expired_at: 2027-02-01
+
+  # ---------------------------------------------------------------------------------
+  # Fixable in principle, but the fix carries more risk than the vulnerability given that
+  # neither code path is reachable here. Deliberately short expiry: this is real debt.
+  # ---------------------------------------------------------------------------------
+
+  - id: CVE-2026-45134
+    statement: >-
+      langsmith 0.4.41 — public prompt pull deserializes untrusted manifests.
+      Not reachable: this project never pulls prompts from the LangSmith hub
+      (`git ls-files '*.py' | xargs grep -n 'pull_prompt'` returns nothing); LangSmith is
+      used for tracing and datasets only, via environment variables. The fix requires
+      langsmith >= 0.8.18, a 0.4 -> 0.8 jump on a 0.x library that the observability setup
+      and the evaluation runner (langsmith.evaluate) both depend on. Deferred so the upgrade
+      can be done as its own change, with the eval suite as the regression net.
+    expired_at: 2026-11-01
+
+  - id: GHSA-f4xh-w4cj-qxq8
+    statement: >-
+      langsmith 0.4.41 — arbitrary server-side file read through TracingMiddleware.
+      Not reachable: the affected component is an ASGI middleware for HTTP services. This is
+      a Streamlit app that enables tracing through environment variables and never mounts
+      TracingMiddleware. Same fix and same deferral as CVE-2026-45134.
+    expired_at: 2026-11-01
+
+  - id: CVE-2026-25087
+    statement: >-
+      pyarrow 21.0.0 — denial of service via use-after-free in Arrow C++.
+      Not reachable through untrusted input: pyarrow is pulled in transitively by Streamlit
+      for dataframe serialization, and the only user-supplied files this app accepts are
+      PDFs. No Arrow, Parquet or Feather payload ever crosses the trust boundary. The fix
+      requires pyarrow 23.0.1, which streamlit 1.51.0 forbids (it pins pyarrow<22); the
+      upper bound is lifted in streamlit 1.52.0, so fixing this means upgrading the UI
+      framework of a live demo. Deferred to a dedicated Streamlit upgrade.
+    expired_at: 2026-11-01
